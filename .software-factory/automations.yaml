@@ -1,0 +1,5 @@
+code-health:
+  schedule: "0 3 * * 1"
+  prompt: |
+    Run the repository's Semgrep, Alint, and ls-lint checks.
+    Investigate material findings and propose the next action.

@@ -1,0 +1,8 @@
+require_version: "2.2.2"
+
+inputs:
+  nixpkgs:
+    url: github:cachix/devenv-nixpkgs/rolling
+
+secretspec:
+  enable: false
