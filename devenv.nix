@@ -1,4 +1,4 @@
-{ pkgs, ... }:
+{ pkgs, lib, ... }:
 
 let
   system = pkgs.stdenv.hostPlatform.system;
@@ -26,4 +26,9 @@ let
 in
 {
   packages = [ dagger ];
+
+  # Devenv 2.2.2's generated container-copy task exports values from a
+  # non-bash package, which newer task validation rejects during shell
+  # evaluation. The setup contract does not use devenv's container tasks.
+  tasks."devenv:container:copy".exports = lib.mkForce [ ];
 }
