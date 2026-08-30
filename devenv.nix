@@ -21,6 +21,7 @@ let
       install -Dm755 dagger "$out/bin/dagger"
       runHook postInstall
     '';
+    meta.mainProgram = "dagger";
   };
 in
 {
