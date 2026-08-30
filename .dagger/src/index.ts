@@ -15,11 +15,11 @@ export class Qualification {
       .from(SEMGREP_IMAGE)
       .withMountedDirectory("/src", repository)
       .withWorkdir("/src")
-      .withExec(["semgrep", "--test", ".dagger/semgrep"])
+      .withExec(["semgrep", "--test", ".semgrep"])
       .withExec([
         "semgrep", "scan", "--error",
-        "--config", ".dagger/semgrep/software-factory-anti-slop.yml",
-        "--exclude", ".dagger/semgrep/software-factory-anti-slop.ts",
+        "--config", ".semgrep/software-factory-anti-slop.yml",
+        "--exclude", ".semgrep/software-factory-anti-slop.ts",
         ".",
       ])
       .stdout()
