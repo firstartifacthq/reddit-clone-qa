@@ -10,9 +10,10 @@ const LS_LINT_SHA256 = "b5a0d2e4427ad039fbc574551f17679f38f142b25d15e0e538769f8c
 export class Qualification {
   @func()
   async semgrep(source: Directory): Promise<string> {
+    const repository = source.withoutDirectory(".crabbox").withoutDirectory(".devenv")
     return dag.container()
       .from(SEMGREP_IMAGE)
-      .withMountedDirectory("/src", source)
+      .withMountedDirectory("/src", repository)
       .withWorkdir("/src")
       .withExec(["semgrep", "--test", ".dagger/semgrep"])
       .withExec([
@@ -26,10 +27,11 @@ export class Qualification {
 
   @func()
   async alint(source: Directory): Promise<string> {
+    const repository = source.withoutDirectory(".crabbox").withoutDirectory(".devenv")
     return dag.container()
       .from(ALINT_IMAGE)
       .withEntrypoint([])
-      .withMountedDirectory("/src", source)
+      .withMountedDirectory("/src", repository)
       .withWorkdir("/src")
       .withExec(["alint", "check", "--fail-on-warning", "."])
       .stdout()
@@ -37,9 +39,10 @@ export class Qualification {
 
   @func()
   async lsLint(source: Directory): Promise<string> {
+    const repository = source.withoutDirectory(".crabbox").withoutDirectory(".devenv")
     return dag.container()
       .from(NODE_IMAGE)
-      .withMountedDirectory("/src", source)
+      .withMountedDirectory("/src", repository)
       .withWorkdir("/src")
       .withFile("/usr/local/bin/ls-lint", dag.http(LS_LINT_URL), { permissions: 0o755 })
       .withExec(["sh", "-ceu", `echo "${LS_LINT_SHA256}  /usr/local/bin/ls-lint" | sha256sum -c -`])
