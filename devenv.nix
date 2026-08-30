@@ -24,8 +24,5 @@ let
   };
 in
 {
-  packages = [
-    pkgs.git
-    dagger
-  ];
+  packages = [ dagger ];
 }
