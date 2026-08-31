@@ -1,11 +1,12 @@
 import { createServer } from "node:http";
-import { createApp, MemoryAuthStore } from "./app.js";
+import { createApp, SqliteAuthStore } from "./app.js";
 
 const port = Number(process.env.PORT ?? 3000);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("PORT must be a valid TCP port");
 const origin = process.env.PUBLIC_ORIGIN ?? `http://localhost:${port}`;
 const secureCookies = process.env.NODE_ENV === "production";
-const app = createApp({ store: new MemoryAuthStore(), origin, secureCookies });
+const store = new SqliteAuthStore({ databasePath: process.env.DATABASE_PATH ?? "data/redditly.sqlite" });
+const app = createApp({ store, origin, secureCookies });
 
 createServer((request, response) => {
   app(request, response).catch(() => {

@@ -1,5 +1,7 @@
 import { createHash, randomBytes, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 
 const scrypt = promisify(scryptCallback);
@@ -48,6 +50,7 @@ export function tokenHash(token) {
   return createHash("sha256").update(token).digest("hex");
 }
 
+// Test-only adapter. Production authority is always provided by SqliteAuthStore.
 export class MemoryAuthStore {
   constructor({ now = () => Date.now(), random = randomBytes, sessionLifetimeMs = DEFAULT_SESSION_MS } = {}) {
     this.now = now;
@@ -131,6 +134,182 @@ export class MemoryAuthStore {
   }
 }
 
+const AUTH_SCHEMA = `
+  CREATE TABLE accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    canonical_identifier TEXT NOT NULL UNIQUE,
+    display_identifier TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  CREATE TABLE sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+    token_hash TEXT NOT NULL UNIQUE,
+    operation_id TEXT NOT NULL REFERENCES auth_operations(operation_id) DEFERRABLE INITIALLY DEFERRED,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    revoked_at INTEGER
+  );
+  CREATE TABLE auth_operations (
+    operation_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('register', 'sign-in')),
+    canonical_identifier TEXT NOT NULL,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+    current_session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    completed_at INTEGER NOT NULL
+  );
+`;
+
+export class SqliteAuthStore {
+  constructor({ databasePath = ":memory:", now = () => Date.now(), random = randomBytes, sessionLifetimeMs = DEFAULT_SESSION_MS } = {}) {
+    if (databasePath !== ":memory:") mkdirSync(dirname(databasePath), { recursive: true });
+    this.databasePath = databasePath;
+    this.now = now;
+    this.random = random;
+    this.sessionLifetimeMs = sessionLifetimeMs;
+    this.database = new DatabaseSync(databasePath);
+    this.database.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+    if (databasePath !== ":memory:") this.database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;");
+    const version = Number(this.database.prepare("PRAGMA user_version").get().user_version);
+    if (version > 1) throw new Error(`Unsupported auth schema version ${version}`);
+    if (version === 0) this.database.exec(`BEGIN IMMEDIATE; ${AUTH_SCHEMA} PRAGMA user_version = 1; COMMIT;`);
+  }
+
+  close() { this.database.close(); }
+
+  accountCount() {
+    return Number(this.database.prepare("SELECT COUNT(*) AS count FROM accounts").get().count);
+  }
+
+  operationCount() {
+    return Number(this.database.prepare("SELECT COUNT(*) AS count FROM auth_operations").get().count);
+  }
+
+  activeSessionCount() {
+    return Number(this.database.prepare("SELECT COUNT(*) AS count FROM sessions WHERE revoked_at IS NULL AND expires_at > ?").get(this.now()).count);
+  }
+
+  async register({ identifier, password, operationId }) {
+    const validation = validateRegistration(identifier, password);
+    if (Object.keys(validation).length) return { kind: "validation", errors: validation };
+    return this.#authenticateOperation({ kind: "register", identifier, password, operationId });
+  }
+
+  async signIn({ identifier, password, operationId }) {
+    return this.#authenticateOperation({ kind: "sign-in", identifier, password, operationId });
+  }
+
+  async #authenticateOperation({ kind, identifier, password, operationId }) {
+    const canonical = normalizeIdentifier(identifier);
+    if (this.#operation(operationId)) return this.#retry({ kind, canonical, password, operationId });
+
+    if (kind === "register") {
+      const passwordHash = await hashPassword(password);
+      const created = this.#transaction(() => {
+        if (this.#operation(operationId)) return { kind: "retry-race" };
+        if (this.#account(canonical)) return { kind: "conflict" };
+        const now = this.now();
+        const accountId = Number(this.database.prepare("INSERT INTO accounts (canonical_identifier, display_identifier, password_hash, created_at) VALUES (?, ?, ?, ?)").run(canonical, String(identifier).trim(), passwordHash, now).lastInsertRowid);
+        const account = this.#account(canonical);
+        return this.#createSession({ account, accountId, kind, canonical, operationId, now });
+      });
+      return created.kind === "retry-race" ? this.#retry({ kind, canonical, password, operationId }) : created;
+    }
+
+    const account = this.#account(canonical);
+    const record = account?.passwordHash ?? await hashPassword(DUMMY_PASSWORD, "0".repeat(32));
+    if (!account || !(await verifyPassword(password, record))) return { kind: "authentication-failure" };
+    const created = this.#transaction(() => {
+      if (this.#operation(operationId)) return { kind: "retry-race" };
+      const current = this.#account(canonical);
+      if (!current || current.id !== account.id) return { kind: "authentication-failure" };
+      return this.#createSession({ account: current, accountId: current.id, kind, canonical, operationId, now: this.now() });
+    });
+    return created.kind === "retry-race" ? this.#retry({ kind, canonical, password, operationId }) : created;
+  }
+
+  async #retry({ kind, canonical, password, operationId }) {
+    const operation = this.#operation(operationId);
+    if (!operation || operation.kind !== kind || operation.canonical !== canonical) return { kind: "recovery" };
+    const account = this.#accountById(operation.accountId);
+    if (!account || !(await verifyPassword(password, account.passwordHash))) return { kind: "authentication-failure" };
+
+    return this.#transaction(() => {
+      const current = this.#operation(operationId);
+      if (!current || current.kind !== kind || current.canonical !== canonical || current.accountId !== account.id) return { kind: "recovery" };
+      const session = this.database.prepare("SELECT id, expires_at AS expiresAt, revoked_at AS revokedAt FROM sessions WHERE id = ?").get(current.sessionId);
+      const token = Buffer.from(this.random(32)).toString("base64url");
+      const hash = tokenHash(token);
+      const now = this.now();
+      if (session && session.revokedAt === null && Number(session.expiresAt) > now) {
+        this.database.prepare("UPDATE sessions SET token_hash = ? WHERE id = ?").run(hash, session.id);
+      } else {
+        const sessionId = Number(this.database.prepare("INSERT INTO sessions (account_id, token_hash, operation_id, created_at, expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, NULL)").run(account.id, hash, operationId, now, now + this.sessionLifetimeMs).lastInsertRowid);
+        this.database.prepare("UPDATE auth_operations SET current_session_id = ?, completed_at = ? WHERE operation_id = ?").run(sessionId, now, operationId);
+      }
+      return { kind: "success", account, token };
+    });
+  }
+
+  #createSession({ account, accountId, kind, canonical, operationId, now }) {
+    const token = Buffer.from(this.random(32)).toString("base64url");
+    const hash = tokenHash(token);
+    const sessionId = Number(this.database.prepare("INSERT INTO sessions (account_id, token_hash, operation_id, created_at, expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, NULL)").run(accountId, hash, operationId, now, now + this.sessionLifetimeMs).lastInsertRowid);
+    this.database.prepare("INSERT INTO auth_operations (operation_id, kind, canonical_identifier, account_id, current_session_id, completed_at) VALUES (?, ?, ?, ?, ?, ?)").run(operationId, kind, canonical, accountId, sessionId, now);
+    return { kind: "success", account, token };
+  }
+
+  #transaction(action) {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const result = action();
+      this.database.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      if (error.code === "ERR_SQLITE_ERROR" && /UNIQUE constraint failed: accounts\.canonical_identifier/.test(error.message)) return { kind: "conflict" };
+      throw error;
+    }
+  }
+
+  #operation(operationId) {
+    const row = this.database.prepare("SELECT operation_id AS id, kind, canonical_identifier AS canonical, account_id AS accountId, current_session_id AS sessionId FROM auth_operations WHERE operation_id = ?").get(operationId);
+    return row ? { ...row, accountId: Number(row.accountId), sessionId: Number(row.sessionId) } : null;
+  }
+
+  #account(canonical) {
+    const row = this.database.prepare("SELECT id, canonical_identifier AS canonical, display_identifier AS identifier, password_hash AS passwordHash, created_at AS createdAt FROM accounts WHERE canonical_identifier = ?").get(canonical);
+    return row ? { ...row, id: Number(row.id), createdAt: Number(row.createdAt) } : null;
+  }
+
+  #accountById(id) {
+    const row = this.database.prepare("SELECT id, canonical_identifier AS canonical, display_identifier AS identifier, password_hash AS passwordHash, created_at AS createdAt FROM accounts WHERE id = ?").get(id);
+    return row ? { ...row, id: Number(row.id), createdAt: Number(row.createdAt) } : null;
+  }
+
+  resolve(token) {
+    if (!token) return null;
+    const row = this.database.prepare(`
+      SELECT s.id AS sessionId, s.created_at AS sessionCreatedAt, s.expires_at AS expiresAt,
+             a.id AS accountId, a.canonical_identifier AS canonical, a.display_identifier AS identifier,
+             a.password_hash AS passwordHash, a.created_at AS accountCreatedAt
+      FROM sessions s JOIN accounts a ON a.id = s.account_id
+      WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ?
+    `).get(tokenHash(token), this.now());
+    if (!row) return null;
+    return {
+      account: { id: Number(row.accountId), canonical: row.canonical, identifier: row.identifier, passwordHash: row.passwordHash, createdAt: Number(row.accountCreatedAt) },
+      session: { id: Number(row.sessionId), createdAt: Number(row.sessionCreatedAt), expiresAt: Number(row.expiresAt), revokedAt: null }
+    };
+  }
+
+  signOut(token) {
+    if (!token) return;
+    this.#transaction(() => this.database.prepare("UPDATE sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL").run(this.now(), tokenHash(token)));
+  }
+}
+
 function parseCookies(header = "") {
   return Object.fromEntries(header.split(";").map((entry) => entry.trim().split(/=(.*)/s)).filter(([key]) => key));
 }
@@ -170,7 +349,7 @@ function authForm({ mode, error = "", errors = {} }) {
   const rules = registration ? `<p class="rules">Identifier: ${identifierRule}. Password: ${credentialRule}.</p>` : "";
   const message = error ? `<p class="error" role="alert">${escapeHtml(error)}</p>` : "";
   const fields = `<label>Identifier<input name="identifier" autocomplete="username" required></label>${errors.identifier ? `<p class="error" role="alert">${escapeHtml(errors.identifier)}</p>` : ""}<label>Password<input type="password" name="password" autocomplete="current-password" required></label>${errors.password ? `<p class="error" role="alert">${escapeHtml(errors.password)}</p>` : ""}`;
-  return `${message}${rules}<form class="auth-form" method="post" action="${action}">${fields}<input type="hidden" name="operationId"><button type="submit">${registration ? "Create account" : "Sign in"}</button><button class="retry" type="submit" hidden>Retry</button></form>`;
+  return `${message}${rules}<form class="auth-form" method="post" action="${action}">${fields}<input type="hidden" name="operationId"><button type="submit">${registration ? "Create account" : "Sign in"}</button><button class="retry" type="submit" hidden>Retry</button><p data-auth-status role="status" aria-live="polite" hidden></p></form>`;
 }
 
 function send(response, rendered, headers = {}) {
@@ -178,7 +357,8 @@ function send(response, rendered, headers = {}) {
   response.end(rendered.body);
 }
 
-export function createApp({ store = new MemoryAuthStore(), origin = "http://localhost", secureCookies = false } = {}) {
+export function createApp({ store, origin = "http://localhost", secureCookies = false } = {}) {
+  if (!store) throw new Error("An authoritative authentication store is required");
   return async function app(request, response) {
     const url = new URL(request.url, origin);
     const sensitiveQuery = [...url.searchParams.keys()].some((key) => /pass|token|secret|credential|session/i.test(key));
