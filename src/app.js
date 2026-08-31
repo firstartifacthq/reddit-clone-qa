@@ -50,24 +50,19 @@ export function tokenHash(token) {
   return createHash("sha256").update(token).digest("hex");
 }
 
-// Test-only adapter. Production authority is always provided by SqliteAuthStore.
-export class MemoryAuthStore {
-  constructor({ now = () => Date.now(), random = randomBytes, sessionLifetimeMs = DEFAULT_SESSION_MS } = {}) {
+export class AuthService {
+  constructor({ persistence, now = () => Date.now(), random = randomBytes, sessionLifetimeMs = DEFAULT_SESSION_MS } = {}) {
+    if (!persistence) throw new Error("An authentication persistence adapter is required");
+    this.persistence = persistence;
     this.now = now;
     this.random = random;
     this.sessionLifetimeMs = sessionLifetimeMs;
-    this.accounts = new Map();
-    this.sessions = new Map();
-    this.operations = new Map();
-    this.sequence = 0;
   }
 
-  activeSessionCount() {
-    const now = this.now();
-    return [...this.sessions.values()].filter((session) => !session.revokedAt && session.expiresAt > now).length;
-  }
-
-  accountCount() { return this.accounts.size; }
+  accountCount() { return this.persistence.accountCount(); }
+  operationCount() { return this.persistence.operationCount(); }
+  activeSessionCount() { return this.persistence.activeSessionCount(this.now()); }
+  close() { this.persistence.close(); }
 
   async register({ identifier, password, operationId }) {
     const validation = validateRegistration(identifier, password);
@@ -81,56 +76,109 @@ export class MemoryAuthStore {
 
   async #authenticateOperation({ kind, identifier, password, operationId }) {
     const canonical = normalizeIdentifier(identifier);
-    const operation = this.operations.get(operationId);
-    if (operation) {
-      if (operation.kind !== kind || operation.canonical !== canonical) return { kind: "recovery" };
-      const account = this.accounts.get(canonical);
-      if (!account || !(await verifyPassword(password, account.passwordHash))) return { kind: "authentication-failure" };
-      const existing = this.sessions.get(operation.sessionHash);
-      // A dropped response may lose the cookie. Rotate one existing session instead of creating another.
-      if (existing && !existing.revokedAt && existing.expiresAt > this.now()) {
-        return this.#issue(account, operation, existing);
-      }
-      return this.#issue(account, operation);
+    if (this.persistence.operation(operationId)) {
+      return this.#retry({ kind, canonical, password, operationId });
     }
 
     if (kind === "register") {
-      if (this.accounts.has(canonical)) return { kind: "conflict" };
-      const account = { id: `account-${++this.sequence}`, identifier: String(identifier).trim(), canonical, passwordHash: await hashPassword(password), createdAt: this.now() };
-      this.accounts.set(canonical, account);
-      return this.#issue(account, { id: operationId, kind, canonical });
+      const passwordHash = await hashPassword(password);
+      const authority = this.#newAuthority();
+      const created = this.persistence.transaction(() => {
+        if (this.persistence.operation(operationId)) return { outcome: "operation-exists" };
+        if (this.persistence.account(canonical)) return { outcome: "account-exists" };
+        const account = this.persistence.insertAccount({
+          canonical,
+          identifier: String(identifier).trim(),
+          passwordHash,
+          createdAt: authority.now
+        });
+        const sessionId = this.persistence.insertSession({
+          accountId: account.id,
+          operationId,
+          tokenHash: authority.hash,
+          createdAt: authority.now,
+          expiresAt: authority.expiresAt
+        });
+        this.persistence.insertOperation({ operationId, kind, canonical, accountId: account.id, sessionId, completedAt: authority.now });
+        return { outcome: "created", account };
+      });
+      if (created.outcome === "operation-exists") {
+        return this.#retry({ kind, canonical, password, operationId });
+      }
+      if (created.outcome === "account-exists") return { kind: "conflict" };
+      return { kind: "success", account: created.account, token: authority.token };
     }
 
-    const account = this.accounts.get(canonical);
-    // The dummy verification keeps unknown accounts on the same password-work path.
+    const account = this.persistence.account(canonical);
     const record = account?.passwordHash ?? await hashPassword(DUMMY_PASSWORD, "0".repeat(32));
     if (!account || !(await verifyPassword(password, record))) return { kind: "authentication-failure" };
-    return this.#issue(account, { id: operationId, kind, canonical });
+
+    const authority = this.#newAuthority();
+    const created = this.persistence.transaction(() => {
+      if (this.persistence.operation(operationId)) return { outcome: "operation-exists" };
+      const current = this.persistence.account(canonical);
+      if (!current || current.id !== account.id) return { outcome: "account-changed" };
+      const sessionId = this.persistence.insertSession({
+        accountId: current.id,
+        operationId,
+        tokenHash: authority.hash,
+        createdAt: authority.now,
+        expiresAt: authority.expiresAt
+      });
+      this.persistence.insertOperation({ operationId, kind, canonical, accountId: current.id, sessionId, completedAt: authority.now });
+      return { outcome: "created", account: current };
+    });
+    if (created.outcome === "operation-exists") {
+      return this.#retry({ kind, canonical, password, operationId });
+    }
+    if (created.outcome === "account-changed") return { kind: "authentication-failure" };
+    return { kind: "success", account: created.account, token: authority.token };
   }
 
-  #issue(account, operation, existing = null) {
+  async #retry({ kind, canonical, password, operationId }) {
+    const operation = this.persistence.operation(operationId);
+    if (!operation || operation.kind !== kind || operation.canonical !== canonical) return { kind: "recovery" };
+    const account = this.persistence.accountById(operation.accountId);
+    if (!account || !(await verifyPassword(password, account.passwordHash))) return { kind: "authentication-failure" };
+
+    const authority = this.#newAuthority();
+    const retried = this.persistence.transaction(() => {
+      const current = this.persistence.operation(operation.id);
+      if (!current || current.kind !== operation.kind || current.canonical !== operation.canonical || current.accountId !== operation.accountId) {
+        return { outcome: "operation-changed" };
+      }
+      const session = this.persistence.session(current.sessionId);
+      if (session && session.revokedAt === null && session.expiresAt > authority.now) {
+        this.persistence.updateSessionToken(session.id, authority.hash);
+      } else {
+        const sessionId = this.persistence.insertSession({
+          accountId: current.accountId,
+          operationId: current.id,
+          tokenHash: authority.hash,
+          createdAt: authority.now,
+          expiresAt: authority.expiresAt
+        });
+        this.persistence.updateOperationSession(current.id, sessionId, authority.now);
+      }
+      return { outcome: "updated" };
+    });
+    if (retried.outcome !== "updated") return { kind: "recovery" };
+    return { kind: "success", account, token: authority.token };
+  }
+
+  #newAuthority() {
     const token = Buffer.from(this.random(32)).toString("base64url");
-    const hash = tokenHash(token);
-    const session = existing ?? { id: `session-${++this.sequence}`, accountCanonical: account.canonical, createdAt: this.now(), expiresAt: this.now() + this.sessionLifetimeMs, revokedAt: null };
-    if (existing) this.sessions.delete(operation.sessionHash);
-    session.tokenHash = hash;
-    this.sessions.set(hash, session);
-    // Operations keep only a hash pointer; raw session authority is never retained after delivery.
-    this.operations.set(operation.id, { ...operation, sessionHash: hash });
-    return { kind: "success", account, token };
+    const now = this.now();
+    return { token, hash: tokenHash(token), now, expiresAt: now + this.sessionLifetimeMs };
   }
 
   resolve(token) {
     if (!token) return null;
-    const session = this.sessions.get(tokenHash(token));
-    if (!session || session.revokedAt || session.expiresAt <= this.now()) return null;
-    const account = this.accounts.get(session.accountCanonical);
-    return account ? { account, session } : null;
+    return this.persistence.resolveSession(tokenHash(token), this.now());
   }
 
   signOut(token) {
-    const session = token && this.sessions.get(tokenHash(token));
-    if (session && !session.revokedAt) session.revokedAt = this.now();
+    if (token) this.persistence.revokeSession(tokenHash(token), this.now());
   }
 }
 
@@ -161,13 +209,11 @@ const AUTH_SCHEMA = `
   );
 `;
 
+// SQLite implements transactional persistence primitives; AuthService owns authentication policy.
 export class SqliteAuthStore {
-  constructor({ databasePath = ":memory:", now = () => Date.now(), random = randomBytes, sessionLifetimeMs = DEFAULT_SESSION_MS } = {}) {
+  constructor({ databasePath = ":memory:" } = {}) {
     if (databasePath !== ":memory:") mkdirSync(dirname(databasePath), { recursive: true });
     this.databasePath = databasePath;
-    this.now = now;
-    this.random = random;
-    this.sessionLifetimeMs = sessionLifetimeMs;
     this.database = new DatabaseSync(databasePath);
     this.database.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
     if (databasePath !== ":memory:") this.database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;");
@@ -186,81 +232,11 @@ export class SqliteAuthStore {
     return Number(this.database.prepare("SELECT COUNT(*) AS count FROM auth_operations").get().count);
   }
 
-  activeSessionCount() {
-    return Number(this.database.prepare("SELECT COUNT(*) AS count FROM sessions WHERE revoked_at IS NULL AND expires_at > ?").get(this.now()).count);
+  activeSessionCount(now) {
+    return Number(this.database.prepare("SELECT COUNT(*) AS count FROM sessions WHERE revoked_at IS NULL AND expires_at > ?").get(now).count);
   }
 
-  async register({ identifier, password, operationId }) {
-    const validation = validateRegistration(identifier, password);
-    if (Object.keys(validation).length) return { kind: "validation", errors: validation };
-    return this.#authenticateOperation({ kind: "register", identifier, password, operationId });
-  }
-
-  async signIn({ identifier, password, operationId }) {
-    return this.#authenticateOperation({ kind: "sign-in", identifier, password, operationId });
-  }
-
-  async #authenticateOperation({ kind, identifier, password, operationId }) {
-    const canonical = normalizeIdentifier(identifier);
-    if (this.#operation(operationId)) return this.#retry({ kind, canonical, password, operationId });
-
-    if (kind === "register") {
-      const passwordHash = await hashPassword(password);
-      const created = this.#transaction(() => {
-        if (this.#operation(operationId)) return { kind: "retry-race" };
-        if (this.#account(canonical)) return { kind: "conflict" };
-        const now = this.now();
-        const accountId = Number(this.database.prepare("INSERT INTO accounts (canonical_identifier, display_identifier, password_hash, created_at) VALUES (?, ?, ?, ?)").run(canonical, String(identifier).trim(), passwordHash, now).lastInsertRowid);
-        const account = this.#account(canonical);
-        return this.#createSession({ account, accountId, kind, canonical, operationId, now });
-      });
-      return created.kind === "retry-race" ? this.#retry({ kind, canonical, password, operationId }) : created;
-    }
-
-    const account = this.#account(canonical);
-    const record = account?.passwordHash ?? await hashPassword(DUMMY_PASSWORD, "0".repeat(32));
-    if (!account || !(await verifyPassword(password, record))) return { kind: "authentication-failure" };
-    const created = this.#transaction(() => {
-      if (this.#operation(operationId)) return { kind: "retry-race" };
-      const current = this.#account(canonical);
-      if (!current || current.id !== account.id) return { kind: "authentication-failure" };
-      return this.#createSession({ account: current, accountId: current.id, kind, canonical, operationId, now: this.now() });
-    });
-    return created.kind === "retry-race" ? this.#retry({ kind, canonical, password, operationId }) : created;
-  }
-
-  async #retry({ kind, canonical, password, operationId }) {
-    const operation = this.#operation(operationId);
-    if (!operation || operation.kind !== kind || operation.canonical !== canonical) return { kind: "recovery" };
-    const account = this.#accountById(operation.accountId);
-    if (!account || !(await verifyPassword(password, account.passwordHash))) return { kind: "authentication-failure" };
-
-    return this.#transaction(() => {
-      const current = this.#operation(operationId);
-      if (!current || current.kind !== kind || current.canonical !== canonical || current.accountId !== account.id) return { kind: "recovery" };
-      const session = this.database.prepare("SELECT id, expires_at AS expiresAt, revoked_at AS revokedAt FROM sessions WHERE id = ?").get(current.sessionId);
-      const token = Buffer.from(this.random(32)).toString("base64url");
-      const hash = tokenHash(token);
-      const now = this.now();
-      if (session && session.revokedAt === null && Number(session.expiresAt) > now) {
-        this.database.prepare("UPDATE sessions SET token_hash = ? WHERE id = ?").run(hash, session.id);
-      } else {
-        const sessionId = Number(this.database.prepare("INSERT INTO sessions (account_id, token_hash, operation_id, created_at, expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, NULL)").run(account.id, hash, operationId, now, now + this.sessionLifetimeMs).lastInsertRowid);
-        this.database.prepare("UPDATE auth_operations SET current_session_id = ?, completed_at = ? WHERE operation_id = ?").run(sessionId, now, operationId);
-      }
-      return { kind: "success", account, token };
-    });
-  }
-
-  #createSession({ account, accountId, kind, canonical, operationId, now }) {
-    const token = Buffer.from(this.random(32)).toString("base64url");
-    const hash = tokenHash(token);
-    const sessionId = Number(this.database.prepare("INSERT INTO sessions (account_id, token_hash, operation_id, created_at, expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, NULL)").run(accountId, hash, operationId, now, now + this.sessionLifetimeMs).lastInsertRowid);
-    this.database.prepare("INSERT INTO auth_operations (operation_id, kind, canonical_identifier, account_id, current_session_id, completed_at) VALUES (?, ?, ?, ?, ?, ?)").run(operationId, kind, canonical, accountId, sessionId, now);
-    return { kind: "success", account, token };
-  }
-
-  #transaction(action) {
+  transaction(action) {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const result = action();
@@ -268,35 +244,61 @@ export class SqliteAuthStore {
       return result;
     } catch (error) {
       this.database.exec("ROLLBACK");
-      if (error.code === "ERR_SQLITE_ERROR" && /UNIQUE constraint failed: accounts\.canonical_identifier/.test(error.message)) return { kind: "conflict" };
+      if (error.code === "ERR_SQLITE_ERROR" && /UNIQUE constraint failed: accounts\.canonical_identifier/.test(error.message)) return { outcome: "account-exists" };
+      if (error.code === "ERR_SQLITE_ERROR" && /UNIQUE constraint failed: auth_operations\.operation_id/.test(error.message)) return { outcome: "operation-exists" };
       throw error;
     }
   }
 
-  #operation(operationId) {
+  insertAccount({ canonical, identifier, passwordHash, createdAt }) {
+    const id = Number(this.database.prepare("INSERT INTO accounts (canonical_identifier, display_identifier, password_hash, created_at) VALUES (?, ?, ?, ?)").run(canonical, identifier, passwordHash, createdAt).lastInsertRowid);
+    return this.accountById(id);
+  }
+
+  insertSession({ accountId, operationId, tokenHash: hash, createdAt, expiresAt }) {
+    return Number(this.database.prepare("INSERT INTO sessions (account_id, token_hash, operation_id, created_at, expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, NULL)").run(accountId, hash, operationId, createdAt, expiresAt).lastInsertRowid);
+  }
+
+  insertOperation({ operationId, kind, canonical, accountId, sessionId, completedAt }) {
+    this.database.prepare("INSERT INTO auth_operations (operation_id, kind, canonical_identifier, account_id, current_session_id, completed_at) VALUES (?, ?, ?, ?, ?, ?)").run(operationId, kind, canonical, accountId, sessionId, completedAt);
+  }
+
+  session(id) {
+    const row = this.database.prepare("SELECT id, account_id AS accountId, expires_at AS expiresAt, revoked_at AS revokedAt FROM sessions WHERE id = ?").get(id);
+    return row ? { ...row, id: Number(row.id), accountId: Number(row.accountId), expiresAt: Number(row.expiresAt), revokedAt: row.revokedAt === null ? null : Number(row.revokedAt) } : null;
+  }
+
+  updateSessionToken(id, hash) {
+    this.database.prepare("UPDATE sessions SET token_hash = ? WHERE id = ?").run(hash, id);
+  }
+
+  updateOperationSession(operationId, sessionId, completedAt) {
+    this.database.prepare("UPDATE auth_operations SET current_session_id = ?, completed_at = ? WHERE operation_id = ?").run(sessionId, completedAt, operationId);
+  }
+
+  operation(operationId) {
     const row = this.database.prepare("SELECT operation_id AS id, kind, canonical_identifier AS canonical, account_id AS accountId, current_session_id AS sessionId FROM auth_operations WHERE operation_id = ?").get(operationId);
     return row ? { ...row, accountId: Number(row.accountId), sessionId: Number(row.sessionId) } : null;
   }
 
-  #account(canonical) {
+  account(canonical) {
     const row = this.database.prepare("SELECT id, canonical_identifier AS canonical, display_identifier AS identifier, password_hash AS passwordHash, created_at AS createdAt FROM accounts WHERE canonical_identifier = ?").get(canonical);
     return row ? { ...row, id: Number(row.id), createdAt: Number(row.createdAt) } : null;
   }
 
-  #accountById(id) {
+  accountById(id) {
     const row = this.database.prepare("SELECT id, canonical_identifier AS canonical, display_identifier AS identifier, password_hash AS passwordHash, created_at AS createdAt FROM accounts WHERE id = ?").get(id);
     return row ? { ...row, id: Number(row.id), createdAt: Number(row.createdAt) } : null;
   }
 
-  resolve(token) {
-    if (!token) return null;
+  resolveSession(hash, now) {
     const row = this.database.prepare(`
       SELECT s.id AS sessionId, s.created_at AS sessionCreatedAt, s.expires_at AS expiresAt,
              a.id AS accountId, a.canonical_identifier AS canonical, a.display_identifier AS identifier,
              a.password_hash AS passwordHash, a.created_at AS accountCreatedAt
       FROM sessions s JOIN accounts a ON a.id = s.account_id
       WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ?
-    `).get(tokenHash(token), this.now());
+    `).get(hash, now);
     if (!row) return null;
     return {
       account: { id: Number(row.accountId), canonical: row.canonical, identifier: row.identifier, passwordHash: row.passwordHash, createdAt: Number(row.accountCreatedAt) },
@@ -304,9 +306,8 @@ export class SqliteAuthStore {
     };
   }
 
-  signOut(token) {
-    if (!token) return;
-    this.#transaction(() => this.database.prepare("UPDATE sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL").run(this.now(), tokenHash(token)));
+  revokeSession(hash, now) {
+    this.transaction(() => this.database.prepare("UPDATE sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL").run(now, hash));
   }
 }
 

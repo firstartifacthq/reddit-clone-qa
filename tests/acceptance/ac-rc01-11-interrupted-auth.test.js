@@ -6,15 +6,16 @@ import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createApp, SqliteAuthStore } from "../../src/app.js";
+import { AuthService, createApp, SqliteAuthStore } from "../../src/app.js";
 import { installAuthClient } from "../../public/auth-client.js";
 
 async function durableFixture(options = {}) {
   const directory = await mkdtemp(join(tmpdir(), "redditly-auth-"));
   const databasePath = join(directory, "auth.sqlite");
   let current = 1_000_000;
-  let store = new SqliteAuthStore({
-    databasePath,
+  let persistence = new SqliteAuthStore({ databasePath });
+  let store = new AuthService({
+    persistence,
     now: () => current,
     sessionLifetimeMs: options.sessionLifetimeMs ?? 60_000,
     random: options.random
@@ -34,7 +35,8 @@ async function durableFixture(options = {}) {
     advance: (milliseconds) => { current += milliseconds; },
     reconstruct: () => {
       store.close();
-      store = new SqliteAuthStore({ databasePath, now: () => current, sessionLifetimeMs: options.sessionLifetimeMs ?? 60_000 });
+      persistence = new SqliteAuthStore({ databasePath });
+      store = new AuthService({ persistence, now: () => current, sessionLifetimeMs: options.sessionLifetimeMs ?? 60_000 });
     },
     close: async () => {
       await new Promise((resolve) => server.close(resolve));

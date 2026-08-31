@@ -2,11 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
-import { createApp, MemoryAuthStore, tokenHash, verifyPassword } from "../../src/app.js";
+import { AuthService, createApp, SqliteAuthStore, tokenHash, verifyPassword } from "../../src/app.js";
 import { fixture, form, register, sessionCookie } from "./helpers.js";
 
 async function safeFailureServer(secret) {
-  const store = new MemoryAuthStore();
+  const persistence = new SqliteAuthStore();
+  const store = new AuthService({ persistence });
   store.register = async () => { throw new Error(`internal failure ${secret}`); };
   const app = createApp({ store, origin: "http://127.0.0.1", secureCookies: true });
   const server = createServer((request, response) => app(request, response).catch(() => {
@@ -17,7 +18,10 @@ async function safeFailureServer(secret) {
   const origin = `http://127.0.0.1:${server.address().port}`;
   return {
     request: (path, init) => fetch(`${origin}${path}`, { redirect: "manual", ...init }),
-    close: () => new Promise((resolve) => server.close(resolve))
+    close: async () => {
+      await new Promise((resolve) => server.close(resolve));
+      store.close();
+    }
   };
 }
 
@@ -33,8 +37,8 @@ test("credential and session canaries remain confined across success, routing an
   assert.doesNotMatch(result.text, new RegExp(token));
   assert.match(result.cookie, /HttpOnly/);
   assert.match(result.cookie, /SameSite=Strict/);
-  const account = [...app.store.accounts.values()][0];
-  const persistedSession = [...app.store.sessions.values()][0];
+  const account = app.persistence.account("private_user");
+  const persistedSession = app.persistence.database.prepare("SELECT token_hash AS tokenHash FROM sessions").get();
   assert.notEqual(account.passwordHash, password);
   assert.equal(await verifyPassword(password, account.passwordHash), true);
   assert.equal(persistedSession.tokenHash, tokenHash(token));

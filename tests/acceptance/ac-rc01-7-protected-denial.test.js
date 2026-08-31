@@ -19,7 +19,9 @@ const invalidSessions = {
   },
   orphaned: async (app) => {
     const result = await register(app);
-    app.store.accounts.delete("river_user");
+    app.persistence.database.exec("PRAGMA foreign_keys = OFF");
+    app.persistence.database.prepare("DELETE FROM accounts WHERE canonical_identifier = ?").run("river_user");
+    app.persistence.database.exec("PRAGMA foreign_keys = ON");
     return sessionCookie(result.cookie);
   }
 };
