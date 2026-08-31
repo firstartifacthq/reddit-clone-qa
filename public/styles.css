@@ -1,0 +1,8 @@
+:root { --ink: #16211f; --paper: #f7f1e7; --rust: #c7502d; --sage: #d5e1c6; --line: #d4c8b8; }
+* { box-sizing: border-box; }
+body { margin: 0; background: radial-gradient(circle at 85% 0, var(--sage), transparent 32rem), var(--paper); color: var(--ink); font: 17px Georgia, serif; }
+header { display: flex; gap: 1.2rem; align-items: center; flex-wrap: wrap; padding: 1rem max(5vw, 1rem); border-bottom: 1px solid var(--line); }
+a { color: inherit; }.brand { font-size: 1.6rem; font-weight: bold; text-decoration: none; letter-spacing: -.05em; }nav, .actions { display: flex; gap: .8rem; align-items: center; }.actions { margin-left: auto; }.actions form { margin: 0; }
+button, .button { background: var(--rust); border: 0; color: white; padding: .55rem .85rem; font: inherit; text-decoration: none; cursor: pointer; }
+main { width: min(42rem, 90vw); margin: 12vh auto; }h1 { font-size: clamp(2.1rem, 7vw, 4.5rem); letter-spacing: -.06em; margin-bottom: .3rem; }.auth-form { display: grid; gap: .8rem; max-width: 30rem; margin-top: 1.5rem; }label { display: grid; gap: .3rem; }input { padding: .65rem; font: inherit; border: 1px solid var(--line); }.error { color: #8b1c16; font-weight: bold; }.rules { color: #3a5746; }.identity { font-size: .9rem; }
+@media (max-width: 640px) { .actions { margin-left: 0; width: 100%; } main { margin: 3rem auto; } }

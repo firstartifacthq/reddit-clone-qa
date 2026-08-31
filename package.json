@@ -1,0 +1,15 @@
+{
+  "name": "reddit-clone-qa",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test",
+    "test:unit": "node --test tests/unit/*.test.js",
+    "test:acceptance": "node --test tests/acceptance/*.test.js",
+    "typecheck": "node --check src/app.js && node --check src/server.js && node --check public/auth-client.js",
+    "verify": "npm run typecheck && npm test"
+  }
+}
