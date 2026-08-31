@@ -5,6 +5,8 @@ const ALINT_IMAGE = "ghcr.io/asamarts/alint:v0.15.0@sha256:e7e7631979741a9b2fdcd
 const NODE_IMAGE = "node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584"
 const LS_LINT_URL = "https://github.com/loeffel-io/ls-lint/releases/download/v2.3.1/ls-lint-linux-amd64"
 const LS_LINT_SHA256 = "b5a0d2e4427ad039fbc574551f17679f38f142b25d15e0e538769f8cf15af397"
+const SEMGREP_RULE = ".semgrep/software-factory-anti-slop.yaml"
+const SEMGREP_TEST = ".semgrep/software-factory-anti-slop.ts"
 
 @object()
 export class Qualification {
@@ -15,11 +17,11 @@ export class Qualification {
       .from(SEMGREP_IMAGE)
       .withMountedDirectory("/src", repository)
       .withWorkdir("/src")
-      .withExec(["semgrep", "--test", ".semgrep"])
+      .withExec(["semgrep", "--test", "--config", SEMGREP_RULE, SEMGREP_TEST])
       .withExec([
         "semgrep", "scan", "--error",
-        "--config", ".semgrep/software-factory-anti-slop.yml",
-        "--exclude", ".semgrep/software-factory-anti-slop.ts",
+        "--config", SEMGREP_RULE,
+        "--exclude", SEMGREP_TEST,
         ".",
       ])
       .stdout()
