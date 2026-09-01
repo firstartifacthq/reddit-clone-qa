@@ -2,6 +2,8 @@
 // @ts-expect-error Node built-in declarations are outside this JavaScript slice's ambient types.
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { accountRepresentation } from "./account-representation.js";
+import { ownerProfileRepresentation, publicProfileRepresentation } from "./profile-representation.js";
+import { normalizeUsername, validateProfilePatch } from "./profile-validation.js";
 
 /** @typedef {import("./auth-repository.js").AuthRepository} AuthRepository */
 /**
@@ -50,13 +52,13 @@ function digest(token) {
  * @returns {Credentials | undefined}
  */
 function validateCredentials(body) {
-  if (!body || typeof body !== "object") return undefined;
-  if (!("username" in body) || !("password" in body)) return undefined;
-  if (typeof body.username !== "string" || typeof body.password !== "string") return undefined;
-  const username = body.username.trim();
-  if (!/^[A-Za-z0-9_-]{3,32}$/.test(username)) return undefined;
-  if (body.password.length < 8 || body.password.length > 128) return undefined;
-  return { username, password: body.password };
+  if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
+  const candidate = /** @type {Record<string, unknown>} */ (body);
+  if (!Object.hasOwn(candidate, "username") || !Object.hasOwn(candidate, "password")) return undefined;
+  const username = normalizeUsername(candidate.username);
+  if (!username || typeof candidate.password !== "string") return undefined;
+  if (candidate.password.length < 8 || candidate.password.length > 128) return undefined;
+  return { username, password: candidate.password };
 }
 
 /**
@@ -66,6 +68,15 @@ function validateCredentials(body) {
 function decodeVerifier(value) {
   // @ts-expect-error Buffer is supplied by the supported Node runtime.
   return Buffer.from(value, "base64");
+}
+
+const SQLITE_CONSTRAINT_UNIQUE = 2067;
+
+/** @param {unknown} error */
+function isUniqueViolation(error) {
+  if (!error || typeof error !== "object") return false;
+  const sqliteError = /** @type {{code?: unknown, errcode?: unknown}} */ (error);
+  return sqliteError.code === "ERR_SQLITE_ERROR" && sqliteError.errcode === SQLITE_CONSTRAINT_UNIQUE;
 }
 
 export class AuthService {
@@ -94,9 +105,7 @@ export class AuthService {
       return { kind: /** @type {const} */ ("success"), account: accountRepresentation(account), token: session.token };
     } catch (error) {
       try { this.database.exec("ROLLBACK"); } catch {}
-      if (error instanceof Error && error.message.includes("UNIQUE constraint failed")) {
-        return { kind: /** @type {const} */ ("duplicate") };
-      }
+      if (isUniqueViolation(error)) return { kind: /** @type {const} */ ("duplicate") };
       throw error;
     }
   }
@@ -108,22 +117,67 @@ export class AuthService {
     const user = this.repository.findUserByUsername(credentials.username);
     const expected = user ? decodeVerifier(user.password_verifier) : DUMMY_VERIFIER;
     const actual = scryptSync(credentials.password, user ? user.password_salt : DUMMY_SALT, 64);
-    if (!timingSafeEqual(actual, expected) || !user) {
-      return { kind: /** @type {const} */ ("invalid-credentials") };
-    }
+    if (!timingSafeEqual(actual, expected) || !user) return { kind: /** @type {const} */ ("invalid-credentials") };
     const session = this.issueSession(user.id);
-    this.repository.createSession(session);
+    if (!this.repository.createSession(session)) return { kind: /** @type {const} */ ("invalid-credentials") };
     return { kind: /** @type {const} */ ("success"), account: accountRepresentation(user), token: session.token };
   }
 
   /**
    * @param {unknown} token
-   * @returns {{id: string, username: string} | undefined}
+   * @returns {{id: string, username: string, bio: string, revision: number} | undefined}
    */
   resolve(token) {
     if (typeof token !== "string" || !/^[A-Za-z0-9_-]{20,}$/.test(token)) return undefined;
     const account = this.repository.findAuthorizedAccount(digest(token), this.now());
-    return account ? accountRepresentation(account) : undefined;
+    return account ? ownerProfileRepresentation(account) : undefined;
+  }
+
+  /**
+   * @param {string} userId
+   * @param {unknown} body
+   */
+  updateProfile(userId, body) {
+    const patch = validateProfilePatch(body);
+    if (!patch) return { kind: /** @type {const} */ ("invalid") };
+    try {
+      this.database.exec("BEGIN IMMEDIATE");
+      const profile = this.repository.updateOwnerProfile(userId, patch);
+      if (!profile) {
+        this.database.exec("ROLLBACK");
+        return { kind: /** @type {const} */ ("unauthorized") };
+      }
+      this.database.exec("COMMIT");
+      return { kind: /** @type {const} */ ("success"), profile: ownerProfileRepresentation(profile) };
+    } catch (error) {
+      try { this.database.exec("ROLLBACK"); } catch {}
+      if (isUniqueViolation(error)) return { kind: /** @type {const} */ ("duplicate") };
+      return { kind: /** @type {const} */ ("unavailable") };
+    }
+  }
+
+  /** @param {unknown} username */
+  publicProfile(username) {
+    const normalized = normalizeUsername(username);
+    if (!normalized) return undefined;
+    const profile = this.repository.findActivePublicProfile(normalized);
+    return profile ? publicProfileRepresentation(profile) : undefined;
+  }
+
+  /** @param {string} userId */
+  deleteAccount(userId) {
+    try {
+      this.database.exec("BEGIN IMMEDIATE");
+      if (!this.repository.deleteActiveAccount(userId, this.now())) {
+        this.database.exec("ROLLBACK");
+        return { kind: /** @type {const} */ ("unauthorized") };
+      }
+      this.database.exec("COMMIT");
+      return { kind: /** @type {const} */ ("success") };
+    } catch {
+      try { this.database.exec("ROLLBACK"); } catch {}
+      return { kind: /** @type {const} */ ("unavailable") };
+    }
   }
 
   /** @param {unknown} token */

@@ -2,7 +2,16 @@ import { openDatabase } from "./database.js";
 import { createConfig } from "./config.js";
 import { AuthRepository } from "./auth/auth-repository.js";
 import { AuthService } from "./auth/auth-service.js";
-import { authenticationError, invalidCredentialsError, invalidRequestError, notFoundError } from "./http-errors.js";
+import {
+  authenticationError,
+  forbiddenError,
+  invalidCredentialsError,
+  invalidProfileError,
+  invalidRequestError,
+  notFoundError,
+  profileUnavailableError,
+  usernameUnavailableError,
+} from "./http-errors.js";
 import { publicCommunities } from "./public-communities.js";
 import { renderShell } from "./public-shell.js";
 
@@ -93,6 +102,13 @@ function headersFacade(headers) {
   return normalized;
 }
 
+/** @param {string} pathname */
+function publicUsername(pathname) {
+  const match = /^\/api\/users\/([^/]+)$/.exec(pathname);
+  if (!match) return undefined;
+  try { return decodeURIComponent(match[1]); } catch { return undefined; }
+}
+
 /** @param {AppOptions} [options] */
 export function createApp(options = {}) {
   const { database: injectedDatabase, now, randomToken, ...configOptions } = options;
@@ -129,6 +145,7 @@ export function createApp(options = {}) {
       const headers = headersFacade(request.headers || {});
       const token = parseCookies(headers.cookie)[config.cookieName];
       const account = auth.resolve(token);
+      const requestedUsername = publicUsername(url.pathname);
 
       if (method === "POST" && url.pathname === "/api/auth/signup") {
         const result = auth.signup(parseJson(request.payload));
@@ -148,6 +165,31 @@ export function createApp(options = {}) {
       }
       if (method === "GET" && url.pathname === "/api/me") {
         return account ? json(200, account) : json(401, authenticationError);
+      }
+      if (method === "PATCH" && url.pathname === "/api/me") {
+        if (!account) return json(401, authenticationError);
+        const result = auth.updateProfile(account.id, parseJson(request.payload));
+        if (result.kind === "success") return json(200, result.profile);
+        if (result.kind === "duplicate") return json(409, usernameUnavailableError);
+        if (result.kind === "unavailable") return json(503, profileUnavailableError);
+        if (result.kind === "unauthorized") return json(401, authenticationError);
+        return json(422, invalidProfileError);
+      }
+      if (method === "DELETE" && url.pathname === "/api/me") {
+        if (!account) return json(401, authenticationError);
+        const result = auth.deleteAccount(account.id);
+        if (result.kind === "success") {
+          return { status: 202, headers: { "set-cookie": `${sessionCookie("", 0)}; Expires=Thu, 01 Jan 1970 00:00:00 GMT` }, body: "" };
+        }
+        if (result.kind === "unauthorized") return json(401, authenticationError);
+        return json(503, profileUnavailableError);
+      }
+      if (method === "GET" && requestedUsername !== undefined) {
+        const profile = auth.publicProfile(requestedUsername);
+        return profile ? json(200, profile) : json(404, notFoundError);
+      }
+      if (method === "PATCH" && requestedUsername !== undefined) {
+        return account ? json(403, forbiddenError) : json(401, authenticationError);
       }
       if (method === "GET" && url.pathname === "/api/communities") return json(200, publicCommunities);
       if (method === "GET" && url.pathname === "/") return html(renderShell(account));
