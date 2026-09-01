@@ -158,6 +158,47 @@ test("accepted account deletion", async () => {
   });
 });
 
+test("account deletion failure rolls back and retry succeeds", async () => {
+  await withApp(async ({ request, app }) => {
+    const account = await signup(request, "recovering-user");
+    const secondLogin = await requestJson(request, "/api/auth/login", "POST", { username: "recovering-user", password });
+    const secondCookie = cookie(secondLogin);
+    const before = await owner(request, account.cookie);
+    const lifecycle = app.database.prepare("SELECT deletion_requested_at FROM users WHERE id = ?");
+    const sessionState = app.database.prepare("SELECT COUNT(*) AS total, COUNT(revoked_at) AS revoked FROM sessions WHERE user_id = ?");
+
+    // This can abort revocation only after the uncommitted deletion marker is visible.
+    app.database.exec(`CREATE TRIGGER fail_session_revocation
+      BEFORE UPDATE OF revoked_at ON sessions
+      WHEN (SELECT deletion_requested_at FROM users WHERE id = NEW.user_id) IS NOT NULL
+      BEGIN SELECT RAISE(ABORT, 'transient'); END`);
+
+    const failed = await request("/api/me", { method: "DELETE", headers: { cookie: account.cookie } });
+    assert.equal(failed.statusCode, 503);
+    assert.deepEqual(await failed.json(), { error: "Profile service unavailable" });
+    assert.equal(failed.headers.get("set-cookie"), null);
+    assert.equal(lifecycle.get(account.body.id).deletion_requested_at, null);
+    assert.equal(sessionState.get(account.body.id).total, 2);
+    assert.equal(sessionState.get(account.body.id).revoked, 0);
+    for (const session of [account.cookie, secondCookie]) assert.deepEqual(await owner(request, session), before);
+    assert.deepEqual(await (await request("/api/users/RECOVERING-USER")).json(), {
+      id: before.id, username: before.username, bio: before.bio,
+    });
+
+    app.database.exec("DROP TRIGGER fail_session_revocation");
+    const retried = await request("/api/me", { method: "DELETE", headers: { cookie: account.cookie } });
+    assert.equal(retried.statusCode, 202);
+    assert.notEqual(lifecycle.get(account.body.id).deletion_requested_at, null);
+    assert.equal(sessionState.get(account.body.id).total, 2);
+    assert.equal(sessionState.get(account.body.id).revoked, 2);
+    assert.equal((await request("/api/users/recovering-user")).statusCode, 404);
+    for (const session of [account.cookie, secondCookie]) {
+      assert.equal((await request("/api/me", { headers: { cookie: session } })).statusCode, 401);
+      assert.equal((await request("/api/me", { method: "DELETE", headers: { cookie: session } })).statusCode, 401);
+    }
+  });
+});
+
 test("profile persistence failure and retry", async () => {
   await withApp(async ({ request, app }) => {
     const account = await signup(request, "retry-user");
