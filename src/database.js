@@ -11,10 +11,11 @@ import { DatabaseSync } from "node:sqlite";
  * @property {() => void} close
  */
 
-const migration = readFileSync(new URL("../migrations/001-auth.sql", import.meta.url), "utf8")
+const authMigration = readFileSync(new URL("../migrations/001-auth.sql", import.meta.url), "utf8")
   .replace("CREATE TABLE users", "CREATE TABLE IF NOT EXISTS users")
   .replace("CREATE TABLE sessions", "CREATE TABLE IF NOT EXISTS sessions")
   .replace("CREATE INDEX sessions_user_id", "CREATE INDEX IF NOT EXISTS sessions_user_id");
+const communitiesMigration = readFileSync(new URL("../migrations/002-communities.sql", import.meta.url), "utf8");
 
 /**
  * @param {string} path
@@ -22,6 +23,8 @@ const migration = readFileSync(new URL("../migrations/001-auth.sql", import.meta
  */
 export function openDatabase(path) {
   const database = new DatabaseSync(path);
-  database.exec(migration);
+  database.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+  database.exec(authMigration);
+  database.exec(communitiesMigration);
   return database;
 }
