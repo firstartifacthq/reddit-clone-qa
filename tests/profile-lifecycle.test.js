@@ -61,22 +61,56 @@ function assertOwner(body, expected) {
   assert.deepEqual(body, expected);
 }
 
+function normalizedHeaders(response) {
+  return Object.fromEntries([...response.headers]
+    .map(([name, value]) => [name.toLowerCase(), value])
+    .sort(([left], [right]) => left.localeCompare(right)));
+}
+
+async function responseSnapshot(response) {
+  return {
+    status: response.statusCode,
+    body: await response.text(),
+    headers: normalizedHeaders(response),
+  };
+}
+
+function assertNoPrivateMaterial(snapshot, fixtureValues = []) {
+  const serialized = JSON.stringify(snapshot);
+  assert.doesNotMatch(serialized, /password|salt|verifier|token|session|revision|deletion|email/i);
+  for (const value of fixtureValues) assert.ok(!serialized.includes(value));
+}
+
 test("AC-RC02-1 updates owner and public profiles atomically", async () => {
   await withApp(async ({ request }) => {
     const account = await signup(request, "riverstone");
     const initial = await owner(request, account.cookie);
     assertOwner(initial, { id: account.body.id, username: "riverstone", bio: "", revision: 0 });
 
-    const edit = await requestJson(request, "/api/me", "PATCH", { username: "river-stone", bio: "Hello, world" }, account.cookie);
-    assert.equal(edit.statusCode, 200);
-    assertOwner(await edit.json(), { id: account.body.id, username: "river-stone", bio: "Hello, world", revision: 1 });
-    const visible = await publicProfile(request, "river-stone");
-    assert.equal(visible.statusCode, 200);
-    assert.deepEqual(await visible.json(), { id: account.body.id, username: "river-stone", bio: "Hello, world" });
+    const bioOnly = await requestJson(request, "/api/me", "PATCH", { bio: "Established bio" }, account.cookie);
+    assert.equal(bioOnly.statusCode, 200);
+    assertOwner(await bioOnly.json(), { ...initial, bio: "Established bio", revision: initial.revision + 1 });
+
+    const usernameOnly = await requestJson(request, "/api/me", "PATCH", { username: "river-stone" }, account.cookie);
+    assert.equal(usernameOnly.statusCode, 200);
+    assertOwner(await usernameOnly.json(), {
+      id: account.body.id,
+      username: "river-stone",
+      bio: "Established bio",
+      revision: initial.revision + 2,
+    });
+    const renamedPublic = await publicProfile(request, "river-stone");
+    assert.equal(renamedPublic.statusCode, 200);
+    assert.deepEqual(await renamedPublic.json(), { id: account.body.id, username: "river-stone", bio: "Established bio" });
     assert.equal((await publicProfile(request, "riverstone")).statusCode, 404);
 
-    const bioOnly = await requestJson(request, "/api/me", "PATCH", { bio: "Second" }, account.cookie);
-    assertOwner(await bioOnly.json(), { id: account.body.id, username: "river-stone", bio: "Second", revision: 2 });
+    const edit = await requestJson(request, "/api/me", "PATCH", { username: "river_stone", bio: "Hello, world" }, account.cookie);
+    assert.equal(edit.statusCode, 200);
+    assertOwner(await edit.json(), { id: account.body.id, username: "river_stone", bio: "Hello, world", revision: initial.revision + 3 });
+    const visible = await publicProfile(request, "river_stone");
+    assert.equal(visible.statusCode, 200);
+    assert.deepEqual(await visible.json(), { id: account.body.id, username: "river_stone", bio: "Hello, world" });
+    assert.equal((await publicProfile(request, "river-stone")).statusCode, 404);
   });
 });
 
@@ -152,14 +186,19 @@ test("AC-RC02-6 rolls back pre-commit persistence failures and retries once", as
   await withApp(async ({ database, request }) => {
     const account = await signup(request, "failure-user");
     const before = await owner(request, account.cookie);
-    database.exec("CREATE TRIGGER fail_profile_update BEFORE UPDATE OF bio ON users BEGIN SELECT RAISE(FAIL, 'temporary failure'); END");
+    const beforePublic = await responseSnapshot(await publicProfile(request, before.username));
+    database.exec("CREATE TRIGGER fail_profile_update BEFORE UPDATE OF bio ON users BEGIN SELECT RAISE(FAIL, 'UNIQUE constraint failed: users.username'); END");
     const failed = await requestJson(request, "/api/me", "PATCH", { bio: "will retry" }, account.cookie);
     assert.equal(failed.statusCode, 503);
     assert.deepEqual(await failed.json(), { error: "Profile service unavailable" });
     assert.deepEqual(await owner(request, account.cookie), before);
+    assert.deepEqual(await responseSnapshot(await publicProfile(request, before.username)), beforePublic);
     database.exec("DROP TRIGGER fail_profile_update");
     const retry = await requestJson(request, "/api/me", "PATCH", { bio: "will retry" }, account.cookie);
+    assert.equal(retry.statusCode, 200);
     assertOwner(await retry.json(), { ...before, bio: "will retry", revision: before.revision + 1 });
+    const finalPublic = await publicProfile(request, before.username);
+    assert.deepEqual(await finalPublic.json(), { id: before.id, username: before.username, bio: "will retry" });
   });
 });
 
@@ -170,6 +209,23 @@ test("AC-RC02-7 exposes only the active public projection", async () => {
     const response = await publicProfile(request, "PUBLIC-USER");
     assert.equal(response.statusCode, 200);
     assert.deepEqual(await response.json(), { id: account.body.id, username: "public-user", bio: "Public bio" });
-    for (const [name, value] of response.headers) assert.doesNotMatch(`${name}:${value}`, /password|salt|verifier|token|session|revision|deletion|email/i);
+    assertNoPrivateMaterial({ headers: normalizedHeaders(response) });
+
+    const hiddenBio = "hidden-fixture-secret";
+    const deleted = await signup(request, "gone-profile");
+    await requestJson(request, "/api/me", "PATCH", { bio: hiddenBio }, deleted.cookie);
+    assert.equal((await request("/api/me", { method: "DELETE", headers: { cookie: deleted.cookie } })).statusCode, 202);
+
+    const deletedSnapshot = await responseSnapshot(await publicProfile(request, "gone-profile"));
+    const unknownSnapshot = await responseSnapshot(await publicProfile(request, "never-profile"));
+    const expectedNotFound = {
+      status: 404,
+      body: JSON.stringify({ error: "Not found" }),
+      headers: { "content-type": "application/json; charset=utf-8" },
+    };
+    assert.deepEqual(unknownSnapshot, expectedNotFound);
+    assert.deepEqual(deletedSnapshot, expectedNotFound);
+    assertNoPrivateMaterial(deletedSnapshot, [deleted.body.id, "gone-profile", hiddenBio, password]);
+    assertNoPrivateMaterial(unknownSnapshot, [deleted.body.id, "gone-profile", hiddenBio, password]);
   });
 });

@@ -70,9 +70,13 @@ function decodeVerifier(value) {
   return Buffer.from(value, "base64");
 }
 
+const SQLITE_CONSTRAINT_UNIQUE = 2067;
+
 /** @param {unknown} error */
 function isUniqueViolation(error) {
-  return error instanceof Error && /UNIQUE constraint failed/i.test(error.message);
+  if (!error || typeof error !== "object") return false;
+  const sqliteError = /** @type {{code?: unknown, errcode?: unknown}} */ (error);
+  return sqliteError.code === "ERR_SQLITE_ERROR" && sqliteError.errcode === SQLITE_CONSTRAINT_UNIQUE;
 }
 
 export class AuthService {
