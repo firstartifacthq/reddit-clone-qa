@@ -1,2 +1,5 @@
 .crabbox/
 .devenv/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
