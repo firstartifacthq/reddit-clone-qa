@@ -6,3 +6,6 @@ export const forbiddenError = Object.freeze({ error: "Forbidden" });
 export const invalidProfileError = Object.freeze({ error: "Invalid profile" });
 export const invalidCommunityError = Object.freeze({ error: "Invalid community" });
 export const profileUnavailableError = Object.freeze({ error: "Profile service unavailable" });
+export const invalidPostError = Object.freeze({ error: "Invalid post" });
+export const postConflictError = Object.freeze({ error: "Post conflict" });
+export const postUnavailableError = Object.freeze({ error: "Post service unavailable" });

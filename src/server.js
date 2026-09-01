@@ -10,7 +10,7 @@ const server = createServer(async (request, response) => {
     method: request.method,
     path: request.url,
     headers: request.headers,
-    payload: Buffer.concat(chunks).toString("utf8"),
+    payload: Buffer.concat(chunks),
   });
   response.writeHead(result.status, result.headers);
   response.end(result.body);
