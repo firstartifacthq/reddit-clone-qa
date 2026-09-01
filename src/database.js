@@ -21,17 +21,18 @@ function migration(name) {
 
 const baselineMigration = migration("001-auth.sql");
 const profileMigration = migration("002-profile-lifecycle.sql");
+const communityMigration = migration("003-community-roles.sql");
 
 /**
  * @param {string} path
  * @returns {Database}
  */
 export function openDatabase(path) {
-  const database = new DatabaseSync(path);
+  const database = new DatabaseSync(path, { timeout: 5_000 });
   try {
     database.exec("PRAGMA foreign_keys = ON; BEGIN IMMEDIATE");
     const version = /** @type {{user_version: number}} */ (database.prepare("PRAGMA user_version").get()).user_version;
-    if (version > 2) throw new Error("Unsupported database schema version");
+    if (version > 3) throw new Error("Unsupported database schema version");
     if (version === 0) {
       database.exec(baselineMigration);
       database.exec("PRAGMA user_version = 1");
@@ -39,6 +40,10 @@ export function openDatabase(path) {
     if (version <= 1) {
       database.exec(profileMigration);
       database.exec("PRAGMA user_version = 2");
+    }
+    if (version <= 2) {
+      database.exec(communityMigration);
+      database.exec("PRAGMA user_version = 3");
     }
     database.exec("COMMIT");
     return database;
