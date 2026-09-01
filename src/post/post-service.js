@@ -3,6 +3,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { postRepresentation } from "./post-representation.js";
 import { validateIdempotencyKey, validatePostCreate, validatePostPatch } from "./post-validation.js";
 
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+
 /** @param {{exec: (sql: string) => void}} database */
 function rollback(database) { try { database.exec("ROLLBACK"); } catch {} }
 /** @param {string | Uint8Array | undefined} body */
@@ -11,7 +13,7 @@ function rawBytes(body) {
   return typeof body === "string" ? Buffer.from(body) : body instanceof Uint8Array ? body : new Uint8Array();
 }
 /** @param {string | Uint8Array | undefined} body */
-function parseBody(body) { try { return JSON.parse(new TextDecoder().decode(rawBytes(body))); } catch { return undefined; } }
+function parseBody(body) { try { return JSON.parse(strictUtf8.decode(rawBytes(body))); } catch { return undefined; } }
 /** @param {string | Uint8Array | undefined} body */
 function bodyDigest(body) { return createHash("sha256").update(rawBytes(body)).digest("hex"); }
 
