@@ -25,6 +25,11 @@ Optional non-secret configuration is captured when the application starts:
 - `GET`, `PATCH`, and `DELETE /api/me`
 - `GET /api/users/:username`
 - `GET /api/communities`
+- `POST /api/communities`
+- `POST /api/communities/:canonicalName/members`
+- `DELETE /api/communities/:canonicalName/members/me`
+- `PATCH /api/communities/:canonicalName/moderators`
+- `GET /api/communities/:canonicalName/modlog`
 - `GET /`
 
 Authentication requests accept JSON with `username` and `password`. Successful signup and login return only an account's `id` and `username`; the opaque session is delivered solely in an `HttpOnly` cookie.
@@ -32,5 +37,7 @@ Authentication requests accept JSON with `username` and `password`. Successful s
 `GET /api/me` and successful `PATCH /api/me` return the owner profile: `id`, `username`, `bio`, and integer `revision`. Public lookups return only `id`, `username`, and `bio`. Usernames use ASCII-only surrounding-whitespace trimming, must be 3 through 32 ASCII letters, digits, underscores, or hyphens, and are unique without regard to ASCII case. Bios contain up to 500 Unicode code points; an empty string clears a bio.
 
 A successful `DELETE /api/me` marks the account deletion-requested and revokes every session atomically. The account can no longer log in, authorize requests, or appear through public lookup, while its username remains reserved. Physical erasure and reactivation are intentionally out of scope.
+
+Authenticated active users can create a community with a 3 through 21 character ASCII letter, digit, or underscore name. Names are ASCII-trimmed and case-folded for uniqueness. Creation makes the creator the immutable owner; joining is idempotent, non-owners can leave, and only the owner can promote or demote an existing active member. The public list contains canonical community names in deterministic order.
 
 Run `npm run typecheck`, `npm test`, and `npm run build` before submitting changes.

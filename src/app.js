@@ -4,12 +4,14 @@ import { AuthRepository } from "./auth/auth-repository.js";
 import { AuthService } from "./auth/auth-service.js";
 import { ProfileRepository } from "./profile/profile-repository.js";
 import { ProfileService } from "./profile/profile-service.js";
+import { CommunityRepository } from "./community/community-repository.js";
+import { CommunityService } from "./community/community-service.js";
+import { canonicalCommunityName } from "./community/community-validation.js";
 import { normalizeUsername } from "./account/username.js";
 import {
-  authenticationError, forbiddenError, invalidCredentialsError, invalidProfileError,
+  authenticationError, forbiddenError, invalidCommunityError, invalidCredentialsError, invalidProfileError,
   invalidRequestError, notFoundError, profileUnavailableError,
 } from "./http-errors.js";
-import { publicCommunities } from "./public-communities.js";
 import { renderShell } from "./public-shell.js";
 
 /** @typedef {{exec: (sql: string) => void, prepare: (sql: string) => any, close: () => void}} Database */
@@ -22,10 +24,10 @@ import { renderShell } from "./public-shell.js";
 function json(status, body, headers = {}) {
   return { status, headers: { "content-type": "application/json; charset=utf-8", ...headers }, body: JSON.stringify(body) };
 }
-
 /** @param {string} body @returns {AppResponse} */
 function html(body) { return { status: 200, headers: { "content-type": "text/html; charset=utf-8" }, body }; }
-
+/** @param {number} status @returns {AppResponse} */
+function empty(status) { return { status, headers: {}, body: "" }; }
 /** @param {unknown} header @returns {Record<string, string>} */
 function parseCookies(header) {
   if (typeof header !== "string") return {};
@@ -36,13 +38,11 @@ function parseCookies(header) {
     try { return [name, decodeURIComponent(part.slice(separator + 1).trim())]; } catch { return [name, ""]; }
   }));
 }
-
 /** @param {unknown} payload @returns {unknown} */
 function parseJson(payload) {
   if (typeof payload !== "string" || payload.length > 16_384) return undefined;
   try { return JSON.parse(payload); } catch { return undefined; }
 }
-
 /** @param {RequestHeaders} headers @returns {Record<string, string>} */
 function headersFacade(headers) {
   /** @type {Record<string, string>} */
@@ -53,12 +53,18 @@ function headersFacade(headers) {
   }
   return normalized;
 }
-
 /** @param {string} pathname @returns {string | undefined} */
 function publicUsername(pathname) {
   const match = /^\/api\/users\/([^/]+)$/.exec(pathname);
   if (!match) return undefined;
   try { return normalizeUsername(decodeURIComponent(match[1])); } catch { return undefined; }
+}
+// null means that this is not a community route; undefined means an invalid route name.
+/** @param {string} pathname @param {string} suffix @returns {string | undefined | null} */
+function communityPath(pathname, suffix) {
+  const match = new RegExp(`^/api/communities/([^/]+)${suffix}$`).exec(pathname);
+  if (!match) return null;
+  try { return canonicalCommunityName(decodeURIComponent(match[1])); } catch { return undefined; }
 }
 
 /** @param {AppOptions} [options] */
@@ -68,8 +74,10 @@ export function createApp(options = {}) {
   const database = injectedDatabase || openDatabase(config.databasePath);
   const authRepository = new AuthRepository(database);
   const profileRepository = new ProfileRepository(database);
+  const communityRepository = new CommunityRepository(database);
   const auth = new AuthService({ repository: authRepository, database, config, now, randomToken });
   const profiles = new ProfileService({ repository: profileRepository, database, now });
+  const communities = new CommunityService({ repository: communityRepository, database, now });
   const ownDatabase = !injectedDatabase;
 
   /** @param {string} token @param {number} maxAgeSeconds */
@@ -133,7 +141,53 @@ export function createApp(options = {}) {
         const profile = profiles.getPublic(username);
         return profile ? json(200, profile) : json(404, notFoundError);
       }
-      if (method === "GET" && url.pathname === "/api/communities") return json(200, publicCommunities);
+      if (method === "POST" && url.pathname === "/api/communities") {
+        if (!account) return json(401, authenticationError);
+        const result = communities.create(account.id, parseJson(request.payload));
+        if (result.kind === "created") return empty(201);
+        if (result.kind === "duplicate") return json(409, { error: "Community already exists" });
+        if (result.kind === "invalid") return json(422, invalidCommunityError);
+        return json(503, { error: "Community service unavailable" });
+      }
+      const joinCommunity = communityPath(url.pathname, "/members");
+      if (method === "POST" && joinCommunity !== null) {
+        if (!account) return json(401, authenticationError);
+        if (!joinCommunity) return json(404, notFoundError);
+        const result = communities.join(account.id, joinCommunity);
+        if (result.kind === "success") return empty(200);
+        if (result.kind === "not-found") return json(404, notFoundError);
+        return json(503, { error: "Community service unavailable" });
+      }
+      const leaveCommunity = communityPath(url.pathname, "/members/me");
+      if (method === "DELETE" && leaveCommunity !== null) {
+        if (!account) return json(401, authenticationError);
+        if (!leaveCommunity) return json(404, notFoundError);
+        const result = communities.leave(account.id, leaveCommunity);
+        if (result.kind === "success") return empty(204);
+        if (result.kind === "not-found") return json(404, notFoundError);
+        return json(503, { error: "Community service unavailable" });
+      }
+      const moderatorCommunity = communityPath(url.pathname, "/moderators");
+      if (method === "PATCH" && moderatorCommunity !== null) {
+        if (!account) return json(401, authenticationError);
+        if (!moderatorCommunity) return json(404, notFoundError);
+        const result = communities.changeModerator(account.id, moderatorCommunity, parseJson(request.payload));
+        if (result.kind === "success") return empty(200);
+        if (result.kind === "forbidden") return json(403, forbiddenError);
+        if (result.kind === "invalid") return json(422, invalidCommunityError);
+        if (result.kind === "not-found") return json(404, notFoundError);
+        return json(503, { error: "Community service unavailable" });
+      }
+      const modlogCommunity = communityPath(url.pathname, "/modlog");
+      if (method === "GET" && modlogCommunity !== null) {
+        if (!account) return json(401, authenticationError);
+        if (!modlogCommunity) return json(404, notFoundError);
+        const result = communities.admitModlog(account.id, modlogCommunity);
+        if (result.kind === "not-found") return json(404, notFoundError);
+        if (result.kind === "forbidden") return json(403, forbiddenError);
+        return json(200, { entries: [] });
+      }
+      if (method === "GET" && url.pathname === "/api/communities") return json(200, { communities: communities.list() });
       if (method === "GET" && url.pathname === "/") return html(renderShell(account));
       return json(404, notFoundError);
     } catch {
