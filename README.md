@@ -33,6 +33,8 @@ Optional non-secret configuration is captured when the application starts:
 - `POST /api/communities/:canonicalName/posts`
 - `GET`, `PATCH`, and `DELETE /api/posts/:id`
 - `GET /api/posts/:id/media`
+- `POST`, `GET /api/posts/:id/comments`
+- `GET`, `PATCH`, and `DELETE /api/comments/:id`
 - `GET /`
 
 Authentication requests accept JSON with `username` and `password`. Successful signup and login return only an account's `id` and `username`; the opaque session is delivered solely in an `HttpOnly` cookie.
@@ -44,5 +46,7 @@ A successful `DELETE /api/me` marks the account deletion-requested and revokes e
 Authenticated active users can create a community with a 3 through 21 character ASCII letter, digit, or underscore name. Names are ASCII-trimmed and case-folded for uniqueness. Creation makes the creator the immutable owner; joining is idempotent, non-owners can leave, and only the owner can promote or demote an existing active member. The public list contains canonical community names in deterministic order.
 
 Current members can publish JSON text, HTTP(S) link, or image media posts. Media uploads use canonical base64 in the JSON request and are stored with their metadata in the local SQLite database; media reads return the accepted bytes with their declared image content type. Post creation accepts an optional `Idempotency-Key` for safe retries. Only the author can edit declared-form fields or delete a post.
+
+Active community members can add JSON comments to a readable post, either top-level or with a same-post `parentId`. Conversations are depth-first pre-order pages; `limit` defaults to 25 and accepts 1 through 100. Returned cursors are opaque, resumable snapshots, so later comments do not enter an existing traversal. Comment authors may edit active comments or replace them with privacy-preserving tombstones while descendants retain their original nesting.
 
 Run `npm run typecheck`, `npm test`, and `npm run build` before submitting changes.
