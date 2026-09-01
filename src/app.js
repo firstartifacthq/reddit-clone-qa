@@ -2,7 +2,9 @@ import { openDatabase } from "./database.js";
 import { createConfig } from "./config.js";
 import { AuthRepository } from "./auth/auth-repository.js";
 import { AuthService } from "./auth/auth-service.js";
-import { authenticationError, invalidCredentialsError, invalidRequestError, notFoundError } from "./http-errors.js";
+import { authenticationError, forbiddenError, invalidCredentialsError, invalidRequestError, notFoundError } from "./http-errors.js";
+import { CommunityRepository } from "./community/community-repository.js";
+import { CommunityService } from "./community/community-service.js";
 import { publicCommunities } from "./public-communities.js";
 import { renderShell } from "./public-shell.js";
 
@@ -80,6 +82,22 @@ function parseJson(payload) {
 }
 
 /**
+ * @param {string} pathname
+ * @returns {{community: string, resource: string} | undefined}
+ */
+function communityRoute(pathname) {
+  const prefix = "/api/communities/";
+  if (!pathname.startsWith(prefix)) return undefined;
+  const parts = pathname.slice(prefix.length).split("/");
+  if (!parts[0]) return undefined;
+  try {
+    return { community: decodeURIComponent(parts[0]), resource: parts.slice(1).join("/") };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * @param {RequestHeaders} headers
  * @returns {Record<string, string>}
  */
@@ -100,7 +118,10 @@ export function createApp(options = {}) {
   const database = injectedDatabase || openDatabase(config.databasePath);
   const repository = new AuthRepository(database);
   const auth = new AuthService({ repository, database, config, now, randomToken });
+  const communityRepository = new CommunityRepository(database);
+  const communities = new CommunityService({ repository: communityRepository, database });
   const ownDatabase = !injectedDatabase;
+  let closed = false;
 
   /**
    * @param {string} token
@@ -149,7 +170,41 @@ export function createApp(options = {}) {
       if (method === "GET" && url.pathname === "/api/me") {
         return account ? json(200, account) : json(401, authenticationError);
       }
-      if (method === "GET" && url.pathname === "/api/communities") return json(200, publicCommunities);
+      if (method === "POST" && url.pathname === "/api/communities") {
+        if (!account) return json(401, authenticationError);
+        const result = communities.create(account, parseJson(request.payload));
+        if (result.kind === "success") return json(201, result.value);
+        if (result.kind === "duplicate") return json(409, { error: "Community already exists" });
+        return json(422, invalidRequestError);
+      }
+
+      const routedCommunity = communityRoute(url.pathname);
+      if (routedCommunity) {
+        if (!account) return json(401, authenticationError);
+        const name = communities.communityPath(routedCommunity.community);
+        if (!name) return json(404, notFoundError);
+        if (method === "POST" && routedCommunity.resource === "members") {
+          const result = communities.join(account, name);
+          return result.kind === "success" ? json(200, result.value) : json(404, notFoundError);
+        }
+        if (method === "DELETE" && routedCommunity.resource === "members/me") {
+          const result = communities.leave(account, name);
+          if (result.kind === "success") return { status: 204, headers: {}, body: "" };
+          return result.kind === "forbidden" ? json(403, forbiddenError) : json(404, notFoundError);
+        }
+        if (method === "PATCH" && routedCommunity.resource === "moderators") {
+          const result = communities.setModerator(account, name, parseJson(request.payload));
+          if (result.kind === "success") return json(200, result.value);
+          if (result.kind === "invalid") return json(422, invalidRequestError);
+          return result.kind === "forbidden" ? json(403, forbiddenError) : json(404, notFoundError);
+        }
+        if (method === "GET" && routedCommunity.resource === "modlog") {
+          const result = communities.modlog(account, name);
+          if (result.kind === "success") return json(200, result.value);
+          return result.kind === "forbidden" ? json(403, forbiddenError) : json(404, notFoundError);
+        }
+      }
+      if (method === "GET" && url.pathname === "/api/communities") return json(200, publicCommunities(communityRepository));
       if (method === "GET" && url.pathname === "/") return html(renderShell(account));
       return json(404, notFoundError);
     } catch {
@@ -171,6 +226,11 @@ export function createApp(options = {}) {
     },
     config,
     accountCount: () => repository.accountCount(),
-    close: () => { if (ownDatabase) database.close(); },
+    close: () => {
+      if (ownDatabase && !closed) {
+        database.close();
+        closed = true;
+      }
+    },
   };
 }

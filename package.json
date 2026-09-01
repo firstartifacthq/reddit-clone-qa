@@ -7,7 +7,7 @@
     "start": "node src/server.js",
     "test": "node --test --no-warnings",
     "typecheck": "corepack yarn --cwd .dagger install --frozen-lockfile --ignore-scripts --silent && .dagger/node_modules/.bin/tsc --noEmit && node --check src/server.js tests/*.js",
-    "build": "node --check src/*.js src/auth/*.js"
+    "build": "node --check src/*.js src/auth/*.js src/community/*.js"
   },
   "engines": {
     "node": ">=24"
