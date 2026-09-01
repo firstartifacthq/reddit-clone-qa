@@ -1,0 +1,5 @@
+ALTER TABLE users ADD COLUMN bio TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0);
+ALTER TABLE users ADD COLUMN deletion_requested_at INTEGER;
+
+CREATE UNIQUE INDEX users_username_nocase ON users(username COLLATE NOCASE);
