@@ -23,6 +23,33 @@ const baselineMigration = migration("001-auth.sql");
 const profileMigration = migration("002-profile-lifecycle.sql");
 const communityMigration = migration("003-community-roles.sql");
 
+/** @param {Database} database */
+function assertCommunityOwnerInvariant(database) {
+  const triggerCount = database.prepare(`SELECT COUNT(*) AS count FROM sqlite_schema
+    WHERE type = 'trigger' AND name IN (
+      'communities_owner_is_immutable',
+      'community_owner_membership_matches_community',
+      'community_owner_membership_matches_community_on_update',
+      'community_inserts_owner_membership',
+      'community_owner_membership_is_immutable',
+      'community_owner_membership_cannot_be_removed'
+    )`).get().count;
+  const invalidState = database.prepare(`SELECT 1
+    FROM communities AS community
+    LEFT JOIN community_memberships AS membership
+      ON membership.community_name = community.canonical_name
+      AND membership.user_id = community.owner_user_id
+      AND membership.role = 'owner'
+    WHERE membership.user_id IS NULL
+    UNION ALL
+    SELECT 1
+    FROM community_memberships AS membership
+    JOIN communities AS community ON community.canonical_name = membership.community_name
+    WHERE membership.role = 'owner' AND membership.user_id <> community.owner_user_id
+    LIMIT 1`).get();
+  if (triggerCount !== 6 || invalidState) throw new Error("community owner invariant is invalid");
+}
+
 /**
  * @param {string} path
  * @returns {Database}
@@ -45,6 +72,7 @@ export function openDatabase(path) {
       database.exec(communityMigration);
       database.exec("PRAGMA user_version = 3");
     }
+    assertCommunityOwnerInvariant(database);
     database.exec("COMMIT");
     return database;
   } catch (error) {

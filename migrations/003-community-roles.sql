@@ -30,8 +30,24 @@ BEGIN
   SELECT RAISE(ABORT, 'owner membership must match community owner');
 END;
 
+CREATE TRIGGER community_owner_membership_matches_community_on_update
+BEFORE UPDATE OF community_name, user_id, role ON community_memberships
+WHEN NEW.role = 'owner' AND NOT EXISTS (
+  SELECT 1 FROM communities WHERE canonical_name = NEW.community_name AND owner_user_id = NEW.user_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'owner membership must match community owner');
+END;
+
+CREATE TRIGGER community_inserts_owner_membership
+AFTER INSERT ON communities
+BEGIN
+  INSERT INTO community_memberships (community_name, user_id, role)
+  VALUES (NEW.canonical_name, NEW.owner_user_id, 'owner');
+END;
+
 CREATE TRIGGER community_owner_membership_is_immutable
-BEFORE UPDATE OF role, user_id ON community_memberships
+BEFORE UPDATE OF community_name, user_id, role ON community_memberships
 WHEN OLD.role = 'owner'
 BEGIN
   SELECT RAISE(ABORT, 'owner membership is immutable');

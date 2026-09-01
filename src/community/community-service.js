@@ -29,7 +29,6 @@ export class CommunityService {
     try {
       this.database.exec("BEGIN IMMEDIATE");
       this.repository.createCommunity({ ...community, ownerId, createdAt: this.now() });
-      this.repository.createMembership(community.canonicalName, ownerId, "owner");
       this.database.exec("COMMIT");
       return { kind: /** @type {const} */ ("created") };
     } catch (error) {

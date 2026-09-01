@@ -9,7 +9,6 @@ export class CommunityRepository {
   /** @param {Database} database */
   constructor(database) {
     this.insertCommunity = database.prepare("INSERT INTO communities (canonical_name, display_name, owner_user_id, created_at) VALUES (?, ?, ?, ?)");
-    this.insertMembership = database.prepare("INSERT INTO community_memberships (community_name, user_id, role) VALUES (?, ?, ?)");
     this.findCommunity = database.prepare("SELECT canonical_name, owner_user_id FROM communities WHERE canonical_name = ?");
     this.findRole = database.prepare("SELECT role FROM community_memberships WHERE community_name = ? AND user_id = ?");
     this.findActiveUser = database.prepare("SELECT id FROM users WHERE username = ? COLLATE NOCASE AND deletion_requested_at IS NULL");
@@ -21,9 +20,6 @@ export class CommunityRepository {
 
   /** @param {{canonicalName: string, displayName: string, ownerId: string, createdAt: number}} community */
   createCommunity(community) { this.insertCommunity.run(community.canonicalName, community.displayName, community.ownerId, community.createdAt); }
-
-  /** @param {string} communityName @param {string} userId @param {"member" | "moderator" | "owner"} role */
-  createMembership(communityName, userId, role) { this.insertMembership.run(communityName, userId, role); }
 
   /** @param {string} communityName */
   communityByName(communityName) { return /** @type {{canonical_name: string, owner_user_id: string} | undefined} */ (this.findCommunity.get(communityName)); }

@@ -16,15 +16,39 @@ test("community migration creates version 3 and protects owner membership", asyn
     const path = join(directory, "fresh.sqlite");
     const database = openDatabase(path);
     assert.equal(database.prepare("PRAGMA user_version").get().user_version, 3);
-    database.prepare("INSERT INTO users (id, username, password_salt, password_verifier, created_at) VALUES (?, ?, ?, ?, ?)").run("owner", "owner-user", "salt", "verifier", 1);
+    const insertUser = database.prepare("INSERT INTO users (id, username, password_salt, password_verifier, created_at) VALUES (?, ?, ?, ?, ?)");
+    insertUser.run("owner", "owner-user", "salt", "verifier", 1);
+    insertUser.run("other", "other-user", "salt", "verifier", 1);
+    database.exec("BEGIN IMMEDIATE");
     database.prepare("INSERT INTO communities (canonical_name, display_name, owner_user_id, created_at) VALUES (?, ?, ?, ?)").run("community", "Community", "owner", 1);
-    database.prepare("INSERT INTO community_memberships (community_name, user_id, role) VALUES (?, ?, ?)").run("community", "owner", "owner");
+    assert.deepEqual(
+      database.prepare("SELECT user_id, role FROM community_memberships WHERE community_name = 'community'").all()
+        .map((row) => ({ user_id: row.user_id, role: row.role })),
+      [{ user_id: "owner", role: "owner" }],
+    );
+    database.exec("COMMIT");
+    assert.throws(() => database.prepare("INSERT INTO community_memberships (community_name, user_id, role) VALUES (?, ?, 'owner')").run("community", "other"), /owner membership must match community owner/);
+    database.prepare("INSERT INTO community_memberships (community_name, user_id, role) VALUES (?, ?, 'member')").run("community", "other");
+    assert.throws(() => database.prepare("UPDATE community_memberships SET role = 'owner' WHERE community_name = ? AND user_id = ?").run("community", "other"), /owner membership must match community owner/);
     assert.throws(() => database.prepare("DELETE FROM community_memberships WHERE community_name = ? AND user_id = ?").run("community", "owner"), /owner membership cannot be removed/);
     assert.throws(() => database.prepare("UPDATE community_memberships SET role = 'member' WHERE community_name = ? AND user_id = ?").run("community", "owner"), /owner membership is immutable/);
     database.close();
     const reopened = openDatabase(path);
-    assert.equal(reopened.prepare("SELECT role FROM community_memberships").get().role, "owner");
+    assert.equal(reopened.prepare("SELECT role FROM community_memberships WHERE user_id = 'owner'").get().role, "owner");
     reopened.close();
+  });
+});
+
+test("community migration fails closed when version 3 owner state is incomplete", async () => {
+  await withDirectory(async (directory) => {
+    const path = join(directory, "invalid-v3.sqlite");
+    const database = openDatabase(path);
+    database.prepare("INSERT INTO users (id, username, password_salt, password_verifier, created_at) VALUES (?, ?, ?, ?, ?)").run("owner", "owner-user", "salt", "verifier", 1);
+    database.prepare("INSERT INTO communities (canonical_name, display_name, owner_user_id, created_at) VALUES (?, ?, ?, ?)").run("community", "Community", "owner", 1);
+    database.exec("DROP TRIGGER community_owner_membership_cannot_be_removed");
+    database.prepare("DELETE FROM community_memberships WHERE community_name = 'community' AND user_id = 'owner'").run();
+    database.close();
+    assert.throws(() => openDatabase(path), /community owner invariant is invalid/);
   });
 });
 

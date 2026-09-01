@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { Worker } from "node:worker_threads";
 import { createApp } from "../src/app.js";
 
@@ -43,6 +44,50 @@ async function createCommunity(request, name, cookie) {
 function memberships(app, name) {
   return app.database.prepare("SELECT user_id, role FROM community_memberships WHERE community_name = ? ORDER BY user_id").all(name)
     .map((row) => ({ user_id: row.user_id, role: row.role }));
+}
+
+function withTimeout(promise, milliseconds, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out`)), milliseconds);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
+function startJoinWorker(workerPath, workerData) {
+  const worker = new Worker(workerPath, { workerData });
+  const messages = [];
+  const waiters = new Map();
+  let failure;
+
+  worker.on("message", (message) => {
+    messages.push(message);
+    const waiter = waiters.get(message.type);
+    if (waiter) {
+      waiters.delete(message.type);
+      waiter.resolve(message);
+    }
+  });
+  worker.once("error", (error) => {
+    failure = error;
+    for (const waiter of waiters.values()) waiter.reject(error);
+    waiters.clear();
+  });
+  const exit = new Promise((resolve) => worker.once("exit", resolve));
+
+  return {
+    worker,
+    exit,
+    hasMessage: (type) => messages.some((message) => message.type === type),
+    waitFor(type) {
+      const message = messages.find((candidate) => candidate.type === type);
+      if (message) return Promise.resolve(message);
+      if (failure) return Promise.reject(failure);
+      return new Promise((resolve, reject) => waiters.set(type, { resolve, reject }));
+    },
+  };
 }
 
 test("SCN-RC-03-H1 creates an owner atomically and persists after reopen", async () => {
@@ -95,15 +140,57 @@ test("SCN-RC-03-H3 rejects invalid community bodies before persistence", async (
 test("SCN-RC-03-H4 owner alone assigns existing active members", async () => {
   await withApp(async ({ app, request }) => {
     const owner = await signup(request, "owner-user");
-    const member = await signup(request, "member-user");
+    const target = await signup(request, "target-user");
+    const memberRequester = await signup(request, "member-requester");
+    const moderatorRequester = await signup(request, "moderator-requester");
+    const inactiveTarget = await signup(request, "inactive-target");
+    const nonMemberTarget = await signup(request, "nonmember-target");
     assert.equal((await createCommunity(request, "roles", owner.cookie)).statusCode, 201);
-    assert.equal((await request("/api/communities/roles/members", { method: "POST", headers: { cookie: member.cookie } })).statusCode, 200);
-    const promote = await requestJson(request, "/api/communities/roles/moderators", "PATCH", { username: "member-user", role: "moderator" }, owner.cookie);
-    assert.equal(promote.statusCode, 200);
-    assert.equal(memberships(app, "roles").find((row) => row.user_id === member.account.id).role, "moderator");
-    assert.equal((await requestJson(request, "/api/communities/roles/moderators", "PATCH", { username: "owner-user", role: "member" }, member.cookie)).statusCode, 403);
-    assert.equal((await requestJson(request, "/api/communities/roles/moderators", "PATCH", { username: "member-user", role: "member" }, owner.cookie)).statusCode, 200);
-    assert.equal(memberships(app, "roles").find((row) => row.user_id === member.account.id).role, "member");
+    for (const account of [target, memberRequester, moderatorRequester, inactiveTarget]) {
+      assert.equal((await request("/api/communities/roles/members", { method: "POST", headers: { cookie: account.cookie } })).statusCode, 200);
+    }
+
+    const assign = (username, role, cookie) => requestJson(
+      request,
+      "/api/communities/roles/moderators",
+      "PATCH",
+      { username, role },
+      cookie,
+    );
+
+    const beforePromotion = memberships(app, "roles");
+    assert.equal((await assign("target-user", "moderator", owner.cookie)).statusCode, 200);
+    const promoted = memberships(app, "roles");
+    assert.deepEqual(
+      promoted,
+      beforePromotion.map((row) => row.user_id === target.account.id ? { ...row, role: "moderator" } : row),
+      "owner promotion changes only the requested role",
+    );
+    assert.equal((await assign("target-user", "moderator", owner.cookie)).statusCode, 200);
+    assert.deepEqual(memberships(app, "roles"), promoted, "idempotent assignment preserves every membership");
+
+    assert.equal((await assign("moderator-requester", "moderator", owner.cookie)).statusCode, 200);
+    app.database.prepare("UPDATE users SET deletion_requested_at = ? WHERE id = ?").run(1_700_000_000_000, inactiveTarget.account.id);
+
+    const deniedTransitions = [
+      { label: "member requester", cookie: memberRequester.cookie, username: "target-user", role: "member", status: 403 },
+      { label: "moderator requester", cookie: moderatorRequester.cookie, username: "target-user", role: "member", status: 403 },
+      { label: "owner target", cookie: owner.cookie, username: "owner-user", role: "member", status: 404 },
+      { label: "inactive target", cookie: owner.cookie, username: "inactive-target", role: "moderator", status: 404 },
+      { label: "active non-member target", cookie: owner.cookie, username: "nonmember-target", role: "moderator", status: 404 },
+    ];
+    for (const transition of deniedTransitions) {
+      const before = memberships(app, "roles");
+      const response = await assign(transition.username, transition.role, transition.cookie);
+      assert.equal(response.statusCode, transition.status, transition.label);
+      assert.deepEqual(memberships(app, "roles"), before, `${transition.label} has no effect`);
+    }
+
+    assert.equal((await assign("target-user", "member", owner.cookie)).statusCode, 200);
+    const demoted = memberships(app, "roles");
+    assert.equal(demoted.find((row) => row.user_id === target.account.id).role, "member");
+    assert.equal(demoted.find((row) => row.user_id === owner.account.id).role, "owner");
+    assert.equal(demoted.length, 5);
   });
 });
 
@@ -112,13 +199,33 @@ test("SCN-RC-03-H5 joins idempotently, preserves roles, and leaves only self", a
     const owner = await signup(request, "owner-user");
     const member = await signup(request, "member-user");
     const neighbor = await signup(request, "neighbor-user");
-    await createCommunity(request, "members", owner.cookie);
-    for (const account of [member, member, neighbor]) assert.equal((await request("/api/communities/members/members", { method: "POST", headers: { cookie: account.cookie } })).statusCode, 200);
+    assert.equal((await createCommunity(request, "members", owner.cookie)).statusCode, 201);
+    const joinCommunity = (cookie) => request("/api/communities/members/members", { method: "POST", headers: { cookie } });
+    const leaveCommunity = (cookie) => request("/api/communities/members/members/me", { method: "DELETE", headers: { cookie } });
+
+    for (const account of [member, member, neighbor]) assert.equal((await joinCommunity(account.cookie)).statusCode, 200);
     assert.equal(memberships(app, "members").filter((row) => row.user_id === member.account.id).length, 1);
-    const leave = await request("/api/communities/members/members/me", { method: "DELETE", headers: { cookie: member.cookie } });
+    assert.equal((await requestJson(request, "/api/communities/members/moderators", "PATCH", { username: "member-user", role: "moderator" }, owner.cookie)).statusCode, 200);
+    const promoted = memberships(app, "members");
+    assert.equal(promoted.find((row) => row.user_id === member.account.id).role, "moderator");
+
+    assert.equal((await joinCommunity(member.cookie)).statusCode, 200);
+    assert.deepEqual(memberships(app, "members"), promoted, "rejoin preserves the moderator role and adjacent rows");
+    assert.equal((await joinCommunity(owner.cookie)).statusCode, 200);
+    assert.deepEqual(memberships(app, "members"), promoted, "owner rejoin preserves ownership");
+    const ownerLeave = await leaveCommunity(owner.cookie);
+    assert.equal(ownerLeave.statusCode, 204);
+    assert.equal(await ownerLeave.text(), "");
+    assert.deepEqual(memberships(app, "members"), promoted, "owner leave is a no-op");
+
+    const leave = await leaveCommunity(member.cookie);
     assert.equal(leave.statusCode, 204);
     assert.equal(await leave.text(), "");
-    assert.deepEqual(memberships(app, "members").map((row) => row.user_id).sort(), [owner.account.id, neighbor.account.id].sort());
+    assert.deepEqual(
+      memberships(app, "members"),
+      promoted.filter((row) => row.user_id !== member.account.id),
+      "leave removes only the authenticated non-owner membership",
+    );
   });
 });
 
@@ -126,17 +233,46 @@ test("SCN-RC-03-H6 concurrent joins converge on one member record", async () => 
   await withApp(async ({ app, request, path }) => {
     const owner = await signup(request, "owner-user");
     const member = await signup(request, "member-user");
-    await createCommunity(request, "concurrent", owner.cookie);
-    const barrier = new SharedArrayBuffer(4);
+    assert.equal((await createCommunity(request, "concurrent", owner.cookie)).statusCode, 201);
+    const barrier = new SharedArrayBuffer(8);
+    const control = new Int32Array(barrier);
     const workerPath = new URL("./community-join-worker.js", import.meta.url);
-    const runWorker = () => new Promise((resolve, reject) => {
-      const worker = new Worker(workerPath, { workerData: { path, cookie: member.cookie, barrier } });
-      worker.once("message", resolve); worker.once("error", reject);
-    });
-    const both = Promise.all([runWorker(), runWorker()]);
-    Atomics.store(new Int32Array(barrier), 0, 1); Atomics.notify(new Int32Array(barrier), 0, 2);
-    assert.deepEqual(await both, [200, 200]);
+    const runs = [
+      startJoinWorker(workerPath, { path, cookie: member.cookie, barrier }),
+      startJoinWorker(workerPath, { path, cookie: member.cookie, barrier }),
+    ];
+    let lockHeld = false;
+
+    try {
+      await withTimeout(Promise.all(runs.map((run) => run.waitFor("ready"))), 2_000, "worker readiness");
+      await delay(25);
+      assert.equal(Atomics.load(control, 0), 0, "the parent still owns the closed start gate");
+      assert.equal(Atomics.load(control, 1), 2, "both initialized applications are waiting at the gate");
+      assert.ok(runs.every((run) => !run.hasMessage("attempting") && !run.hasMessage("result")), "neither join starts before release");
+
+      // Hold a real competing write lock so removing DatabaseSync's bounded wait is observable.
+      app.database.exec("BEGIN IMMEDIATE");
+      lockHeld = true;
+      Atomics.store(control, 0, 1);
+      assert.equal(Atomics.notify(control, 0, 2), 2, "both blocked workers are released together");
+      const attempts = await withTimeout(Promise.all(runs.map((run) => run.waitFor("attempting"))), 2_000, "join attempts");
+      assert.deepEqual(attempts.map((message) => message.waitResult), ["ok", "ok"]);
+      await delay(100);
+      app.database.exec("COMMIT");
+      lockHeld = false;
+
+      const results = await withTimeout(Promise.all(runs.map((run) => run.waitFor("result"))), 2_000, "join results");
+      assert.deepEqual(results.map((message) => message.statusCode), [200, 200]);
+      assert.deepEqual(await withTimeout(Promise.all(runs.map((run) => run.exit)), 2_000, "worker exits"), [0, 0]);
+    } finally {
+      if (lockHeld) app.database.exec("ROLLBACK");
+      Atomics.store(control, 0, 1);
+      Atomics.notify(control, 0, 2);
+      await Promise.allSettled(runs.map((run) => run.worker.terminate()));
+    }
+
     assert.deepEqual(memberships(app, "concurrent").filter((row) => row.user_id === member.account.id), [{ user_id: member.account.id, role: "member" }]);
+    assert.equal(app.database.prepare("PRAGMA integrity_check").get().integrity_check, "ok");
   });
 });
 
