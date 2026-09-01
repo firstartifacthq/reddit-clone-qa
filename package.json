@@ -6,8 +6,8 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test --no-warnings",
-    "typecheck": "corepack yarn --cwd .dagger install --frozen-lockfile --ignore-scripts --silent && .dagger/node_modules/.bin/tsc --noEmit && node --check src/server.js tests/*.js",
-    "build": "node --check src/*.js src/auth/*.js"
+    "typecheck": "corepack yarn --cwd .dagger install --frozen-lockfile --ignore-scripts --silent && .dagger/node_modules/.bin/tsc --noEmit && node --check src/server.js src/account/*.js src/auth/*.js src/profile/*.js tests/*.js",
+    "build": "node --check src/*.js src/account/*.js src/auth/*.js src/profile/*.js"
   },
   "engines": {
     "node": ">=24"

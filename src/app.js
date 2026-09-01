@@ -2,64 +2,31 @@ import { openDatabase } from "./database.js";
 import { createConfig } from "./config.js";
 import { AuthRepository } from "./auth/auth-repository.js";
 import { AuthService } from "./auth/auth-service.js";
-import { authenticationError, invalidCredentialsError, invalidRequestError, notFoundError } from "./http-errors.js";
+import { ProfileRepository } from "./profile/profile-repository.js";
+import { ProfileService } from "./profile/profile-service.js";
+import { normalizeUsername } from "./account/username.js";
+import {
+  authenticationError, forbiddenError, invalidCredentialsError, invalidProfileError,
+  invalidRequestError, notFoundError, profileUnavailableError,
+} from "./http-errors.js";
 import { publicCommunities } from "./public-communities.js";
 import { renderShell } from "./public-shell.js";
 
-/**
- * @typedef {object} Database
- * @property {(sql: string) => void} exec
- * @property {(sql: string) => any} prepare
- * @property {() => void} close
- */
-/**
- * @typedef {object} AppOptions
- * @property {Database} [database]
- * @property {string} [databasePath]
- * @property {number} [port]
- * @property {number} [sessionLifetimeMs]
- * @property {string} [cookieName]
- * @property {boolean} [secureCookies]
- * @property {() => number} [now]
- * @property {() => string} [randomToken]
- */
+/** @typedef {{exec: (sql: string) => void, prepare: (sql: string) => any, close: () => void}} Database */
+/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string}} AppOptions */
 /** @typedef {Record<string, string | string[] | undefined>} RequestHeaders */
-/**
- * @typedef {object} AppRequest
- * @property {string} [method]
- * @property {string} [path]
- * @property {RequestHeaders} [headers]
- * @property {string} [payload]
- */
-/**
- * @typedef {object} AppResponse
- * @property {number} status
- * @property {Record<string, string>} headers
- * @property {string} body
- */
+/** @typedef {{method?: string, path?: string, headers?: RequestHeaders, payload?: string}} AppRequest */
+/** @typedef {{status: number, headers: Record<string, string>, body: string}} AppResponse */
 
-/**
- * @param {number} status
- * @param {unknown} body
- * @param {Record<string, string>} [headers]
- * @returns {AppResponse}
- */
+/** @param {number} status @param {unknown} body @param {Record<string, string>} [headers] @returns {AppResponse} */
 function json(status, body, headers = {}) {
   return { status, headers: { "content-type": "application/json; charset=utf-8", ...headers }, body: JSON.stringify(body) };
 }
 
-/**
- * @param {string} body
- * @returns {AppResponse}
- */
-function html(body) {
-  return { status: 200, headers: { "content-type": "text/html; charset=utf-8" }, body };
-}
+/** @param {string} body @returns {AppResponse} */
+function html(body) { return { status: 200, headers: { "content-type": "text/html; charset=utf-8" }, body }; }
 
-/**
- * @param {unknown} header
- * @returns {Record<string, string>}
- */
+/** @param {unknown} header @returns {Record<string, string>} */
 function parseCookies(header) {
   if (typeof header !== "string") return {};
   return Object.fromEntries(header.split(";").map((part) => {
@@ -70,19 +37,13 @@ function parseCookies(header) {
   }));
 }
 
-/**
- * @param {unknown} payload
- * @returns {unknown}
- */
+/** @param {unknown} payload @returns {unknown} */
 function parseJson(payload) {
   if (typeof payload !== "string" || payload.length > 16_384) return undefined;
   try { return JSON.parse(payload); } catch { return undefined; }
 }
 
-/**
- * @param {RequestHeaders} headers
- * @returns {Record<string, string>}
- */
+/** @param {RequestHeaders} headers @returns {Record<string, string>} */
 function headersFacade(headers) {
   /** @type {Record<string, string>} */
   const normalized = {};
@@ -93,35 +54,32 @@ function headersFacade(headers) {
   return normalized;
 }
 
+/** @param {string} pathname @returns {string | undefined} */
+function publicUsername(pathname) {
+  const match = /^\/api\/users\/([^/]+)$/.exec(pathname);
+  if (!match) return undefined;
+  try { return normalizeUsername(decodeURIComponent(match[1])); } catch { return undefined; }
+}
+
 /** @param {AppOptions} [options] */
 export function createApp(options = {}) {
   const { database: injectedDatabase, now, randomToken, ...configOptions } = options;
   const config = createConfig(configOptions);
   const database = injectedDatabase || openDatabase(config.databasePath);
-  const repository = new AuthRepository(database);
-  const auth = new AuthService({ repository, database, config, now, randomToken });
+  const authRepository = new AuthRepository(database);
+  const profileRepository = new ProfileRepository(database);
+  const auth = new AuthService({ repository: authRepository, database, config, now, randomToken });
+  const profiles = new ProfileService({ repository: profileRepository, database, now });
   const ownDatabase = !injectedDatabase;
 
-  /**
-   * @param {string} token
-   * @param {number} maxAgeSeconds
-   */
+  /** @param {string} token @param {number} maxAgeSeconds */
   function sessionCookie(token, maxAgeSeconds) {
-    const attributes = [
-      `${config.cookieName}=${encodeURIComponent(token)}`,
-      "Path=/",
-      "HttpOnly",
-      "SameSite=Lax",
-      `Max-Age=${maxAgeSeconds}`,
-    ];
+    const attributes = [`${config.cookieName}=${encodeURIComponent(token)}`, "Path=/", "HttpOnly", "SameSite=Lax", `Max-Age=${maxAgeSeconds}`];
     if (config.secureCookies) attributes.push("Secure");
     return attributes.join("; ");
   }
 
-  /**
-   * @param {AppRequest} request
-   * @returns {Promise<AppResponse>}
-   */
+  /** @param {AppRequest} request @returns {Promise<AppResponse>} */
   async function handle(request) {
     try {
       const method = (request.method || "GET").toUpperCase();
@@ -129,6 +87,8 @@ export function createApp(options = {}) {
       const headers = headersFacade(request.headers || {});
       const token = parseCookies(headers.cookie)[config.cookieName];
       const account = auth.resolve(token);
+      const username = publicUsername(url.pathname);
+      const isPublicUserRoute = /^\/api\/users\/[^/]+$/.test(url.pathname);
 
       if (method === "POST" && url.pathname === "/api/auth/signup") {
         const result = auth.signup(parseJson(request.payload));
@@ -147,7 +107,31 @@ export function createApp(options = {}) {
         return { status: 204, headers: { "set-cookie": `${sessionCookie("", 0)}; Expires=Thu, 01 Jan 1970 00:00:00 GMT` }, body: "" };
       }
       if (method === "GET" && url.pathname === "/api/me") {
-        return account ? json(200, account) : json(401, authenticationError);
+        if (!account) return json(401, authenticationError);
+        const profile = profiles.getOwner(account.id);
+        return profile ? json(200, profile) : json(401, authenticationError);
+      }
+      if (method === "PATCH" && url.pathname === "/api/me") {
+        if (!account) return json(401, authenticationError);
+        const result = profiles.edit(account.id, parseJson(request.payload));
+        if (result.kind === "success") return json(200, result.profile);
+        if (result.kind === "invalid") return json(422, invalidProfileError);
+        if (result.kind === "conflict") return json(409, { error: "Profile conflict" });
+        if (result.kind === "lost-authority") return json(401, authenticationError);
+        return json(503, profileUnavailableError);
+      }
+      if (method === "DELETE" && url.pathname === "/api/me") {
+        if (!account) return json(401, authenticationError);
+        const result = profiles.delete(account.id);
+        if (result.kind === "success") return json(202, { status: "Deletion requested" }, { "set-cookie": `${sessionCookie("", 0)}; Expires=Thu, 01 Jan 1970 00:00:00 GMT` });
+        if (result.kind === "lost-authority") return json(401, authenticationError);
+        return json(503, profileUnavailableError);
+      }
+      if (method === "PATCH" && isPublicUserRoute) return account ? json(403, forbiddenError) : json(401, authenticationError);
+      if (method === "GET" && isPublicUserRoute) {
+        if (!username) return json(404, notFoundError);
+        const profile = profiles.getPublic(username);
+        return profile ? json(200, profile) : json(404, notFoundError);
       }
       if (method === "GET" && url.pathname === "/api/communities") return json(200, publicCommunities);
       if (method === "GET" && url.pathname === "/") return html(renderShell(account));
@@ -162,15 +146,11 @@ export function createApp(options = {}) {
     /** @param {AppRequest} request */
     async inject(request) {
       const result = await handle(request);
-      return {
-        statusCode: result.status,
-        headers: new Headers(result.headers),
-        text: async () => result.body,
-        json: async () => JSON.parse(result.body),
-      };
+      return { statusCode: result.status, headers: new Headers(result.headers), text: async () => result.body, json: async () => JSON.parse(result.body) };
     },
     config,
-    accountCount: () => repository.accountCount(),
+    database,
+    accountCount: () => authRepository.accountCount(),
     close: () => { if (ownDatabase) database.close(); },
   };
 }
