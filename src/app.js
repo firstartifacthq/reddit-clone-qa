@@ -8,16 +8,20 @@ import { CommunityRepository } from "./community/community-repository.js";
 import { CommunityService } from "./community/community-service.js";
 import { PostRepository } from "./post/post-repository.js";
 import { PostService } from "./post/post-service.js";
+import { CommentRepository } from "./comment/comment-repository.js";
+import { CommentService } from "./comment/comment-service.js";
+import { validateCommentPage } from "./comment/comment-validation.js";
 import { canonicalCommunityName } from "./community/community-validation.js";
 import { normalizeUsername } from "./account/username.js";
 import {
   authenticationError, forbiddenError, invalidCommunityError, invalidCredentialsError, invalidProfileError,
   invalidRequestError, notFoundError, profileUnavailableError, invalidPostError, postConflictError, postUnavailableError,
+  invalidCommentError, invalidCommentPageError, commentUnavailableError,
 } from "./http-errors.js";
 import { renderShell } from "./public-shell.js";
 
 /** @typedef {{exec: (sql: string) => void, prepare: (sql: string) => any, close: () => void}} Database */
-/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string, beforeMediaPersist?: () => void}} AppOptions */
+/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string, beforeMediaPersist?: () => void, beforeCommentPersist?: () => void}} AppOptions */
 /** @typedef {Record<string, string | string[] | undefined>} RequestHeaders */
 /** @typedef {{method?: string, path?: string, headers?: RequestHeaders, payload?: string | Uint8Array}} AppRequest */
 /** @typedef {{status: number, headers: Record<string, string>, body: string | Uint8Array}} AppResponse */
@@ -80,6 +84,18 @@ function postPath(pathname) {
   if (!match) return undefined;
   try { return { id: decodeURIComponent(match[1]), media: Boolean(match[2]) }; } catch { return undefined; }
 }
+/** @param {string} pathname */
+function postCommentsPath(pathname) {
+  const match = /^\/api\/posts\/([^/]+)\/comments$/.exec(pathname);
+  if (!match) return undefined;
+  try { return decodeURIComponent(match[1]); } catch { return undefined; }
+}
+/** @param {string} pathname */
+function commentPath(pathname) {
+  const match = /^\/api\/comments\/([^/]+)$/.exec(pathname);
+  if (!match) return undefined;
+  try { return decodeURIComponent(match[1]); } catch { return undefined; }
+}
 /** @param {string | undefined} contentType */
 function isJsonContentType(contentType) { return typeof contentType === "string" && contentType.split(";", 1)[0].trim().toLowerCase() === "application/json"; }
 
@@ -92,10 +108,12 @@ export function createApp(options = {}) {
   const profileRepository = new ProfileRepository(database);
   const communityRepository = new CommunityRepository(database);
   const postRepository = new PostRepository(database);
+  const commentRepository = new CommentRepository(database);
   const auth = new AuthService({ repository: authRepository, database, config, now, randomToken });
   const profiles = new ProfileService({ repository: profileRepository, database, now });
   const communities = new CommunityService({ repository: communityRepository, database, now });
   const posts = new PostService({ repository: postRepository, database, beforeMediaPersist: options.beforeMediaPersist });
+  const comments = new CommentService({ repository: commentRepository, database, beforeCommentPersist: options.beforeCommentPersist });
   const ownDatabase = !injectedDatabase;
 
   /** @param {string} token @param {number} maxAgeSeconds */
@@ -218,6 +236,55 @@ export function createApp(options = {}) {
         if (result.kind === "too-large") return json(413, invalidPostError);
         if (result.kind === "invalid") return json(422, invalidPostError);
         return json(503, postUnavailableError);
+      }
+      const commentPostId = postCommentsPath(url.pathname);
+      if (commentPostId && method === "POST") {
+        if (!account) return json(401, authenticationError);
+        const admission = comments.authorizeCreate(account.id, commentPostId);
+        if (admission === "not-found") return json(404, notFoundError);
+        if (admission === "forbidden") return json(403, forbiddenError);
+        if (!isJsonContentType(headers["content-type"])) return json(422, invalidCommentError);
+        const result = comments.create(account.id, commentPostId, request.payload);
+        if (result.kind === "success") return json(201, result.comment);
+        if (result.kind === "not-found") return json(404, notFoundError);
+        if (result.kind === "forbidden") return json(403, forbiddenError);
+        if (result.kind === "invalid") return json(422, invalidCommentError);
+        return json(503, commentUnavailableError);
+      }
+      if (commentPostId && method === "GET") {
+        const page = validateCommentPage(url.searchParams);
+        if (!page) return json(422, invalidCommentPageError);
+        const result = comments.conversation(commentPostId, page.limit, page.cursor);
+        if (result.kind === "success") return json(200, { comments: result.comments, nextCursor: result.nextCursor });
+        if (result.kind === "not-found") return json(404, notFoundError);
+        if (result.kind === "invalid-page") return json(422, invalidCommentPageError);
+        return json(503, commentUnavailableError);
+      }
+      const commentId = commentPath(url.pathname);
+      if (commentId && method === "GET") {
+        const comment = comments.get(commentId);
+        return comment ? json(200, comment) : json(404, notFoundError);
+      }
+      if (commentId && method === "PATCH") {
+        if (!account) return json(401, authenticationError);
+        const admission = comments.authorizeMutation(account.id, commentId);
+        if (admission === "not-found") return json(404, notFoundError);
+        if (admission === "forbidden") return json(403, forbiddenError);
+        if (!isJsonContentType(headers["content-type"])) return json(422, invalidCommentError);
+        const result = comments.edit(account.id, commentId, request.payload);
+        if (result.kind === "success") return json(200, result.comment);
+        if (result.kind === "not-found") return json(404, notFoundError);
+        if (result.kind === "forbidden") return json(403, forbiddenError);
+        if (result.kind === "invalid") return json(422, invalidCommentError);
+        return json(503, commentUnavailableError);
+      }
+      if (commentId && method === "DELETE") {
+        if (!account) return json(401, authenticationError);
+        const result = comments.delete(account.id, commentId);
+        if (result.kind === "success") return empty(204);
+        if (result.kind === "not-found") return json(404, notFoundError);
+        if (result.kind === "forbidden") return json(403, forbiddenError);
+        return json(503, commentUnavailableError);
       }
       const postRoute = postPath(url.pathname);
       if (postRoute && method === "GET") {

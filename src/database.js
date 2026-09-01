@@ -23,6 +23,7 @@ const baselineMigration = migration("001-auth.sql");
 const profileMigration = migration("002-profile-lifecycle.sql");
 const communityMigration = migration("003-community-roles.sql");
 const postMigration = migration("004-posts.sql");
+const commentMigration = migration("005-comments.sql");
 
 /** @param {Database} database */
 function assertCommunityOwnerInvariant(database) {
@@ -61,6 +62,15 @@ function assertPostInvariant(database) {
   if (invalid) throw new Error("post invariant is invalid");
 }
 
+/** @param {Database} database */
+function assertCommentInvariant(database) {
+  const invalid = database.prepare(`SELECT 1 FROM comments WHERE NOT (
+    (state = 'active' AND author_user_id IS NOT NULL AND body IS NOT NULL) OR
+    (state = 'deleted' AND author_user_id IS NULL AND body IS NULL)
+  ) LIMIT 1`).get();
+  if (invalid) throw new Error("comment invariant is invalid");
+}
+
 /**
  * @param {string} path
  * @returns {Database}
@@ -70,7 +80,7 @@ export function openDatabase(path) {
   try {
     database.exec("PRAGMA foreign_keys = ON; BEGIN IMMEDIATE");
     const version = /** @type {{user_version: number}} */ (database.prepare("PRAGMA user_version").get()).user_version;
-    if (version > 4) throw new Error("Unsupported database schema version");
+    if (version > 5) throw new Error("Unsupported database schema version");
     if (version === 0) {
       database.exec(baselineMigration);
       database.exec("PRAGMA user_version = 1");
@@ -87,8 +97,13 @@ export function openDatabase(path) {
       database.exec(postMigration);
       database.exec("PRAGMA user_version = 4");
     }
+    if (version <= 4) {
+      database.exec(commentMigration);
+      database.exec("PRAGMA user_version = 5");
+    }
     assertCommunityOwnerInvariant(database);
     assertPostInvariant(database);
+    assertCommentInvariant(database);
     database.exec("COMMIT");
     return database;
   } catch (error) {
