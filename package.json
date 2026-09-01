@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test --no-warnings",
-    "typecheck": "node --check src/*.js src/auth/*.js tests/*.js",
+    "typecheck": "corepack yarn --cwd .dagger install --frozen-lockfile --ignore-scripts --silent && .dagger/node_modules/.bin/tsc --noEmit && node --check src/server.js tests/*.js",
     "build": "node --check src/*.js src/auth/*.js"
   },
   "engines": {

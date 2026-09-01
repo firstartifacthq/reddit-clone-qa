@@ -6,14 +6,60 @@ import { authenticationError, invalidCredentialsError, invalidRequestError, notF
 import { publicCommunities } from "./public-communities.js";
 import { renderShell } from "./public-shell.js";
 
+/**
+ * @typedef {object} Database
+ * @property {(sql: string) => void} exec
+ * @property {(sql: string) => any} prepare
+ * @property {() => void} close
+ */
+/**
+ * @typedef {object} AppOptions
+ * @property {Database} [database]
+ * @property {string} [databasePath]
+ * @property {number} [port]
+ * @property {number} [sessionLifetimeMs]
+ * @property {string} [cookieName]
+ * @property {boolean} [secureCookies]
+ * @property {() => number} [now]
+ * @property {() => string} [randomToken]
+ */
+/** @typedef {Record<string, string | string[] | undefined>} RequestHeaders */
+/**
+ * @typedef {object} AppRequest
+ * @property {string} [method]
+ * @property {string} [path]
+ * @property {RequestHeaders} [headers]
+ * @property {string} [payload]
+ */
+/**
+ * @typedef {object} AppResponse
+ * @property {number} status
+ * @property {Record<string, string>} headers
+ * @property {string} body
+ */
+
+/**
+ * @param {number} status
+ * @param {unknown} body
+ * @param {Record<string, string>} [headers]
+ * @returns {AppResponse}
+ */
 function json(status, body, headers = {}) {
   return { status, headers: { "content-type": "application/json; charset=utf-8", ...headers }, body: JSON.stringify(body) };
 }
 
+/**
+ * @param {string} body
+ * @returns {AppResponse}
+ */
 function html(body) {
   return { status: 200, headers: { "content-type": "text/html; charset=utf-8" }, body };
 }
 
+/**
+ * @param {unknown} header
+ * @returns {Record<string, string>}
+ */
 function parseCookies(header) {
   if (typeof header !== "string") return {};
   return Object.fromEntries(header.split(";").map((part) => {
@@ -24,17 +70,30 @@ function parseCookies(header) {
   }));
 }
 
+/**
+ * @param {unknown} payload
+ * @returns {unknown}
+ */
 function parseJson(payload) {
   if (typeof payload !== "string" || payload.length > 16_384) return undefined;
   try { return JSON.parse(payload); } catch { return undefined; }
 }
 
+/**
+ * @param {RequestHeaders} headers
+ * @returns {Record<string, string>}
+ */
 function headersFacade(headers) {
+  /** @type {Record<string, string>} */
   const normalized = {};
-  for (const [name, value] of Object.entries(headers)) normalized[name.toLowerCase()] = Array.isArray(value) ? value.join("; ") : value;
+  for (const [name, value] of Object.entries(headers)) {
+    if (typeof value === "string") normalized[name.toLowerCase()] = value;
+    else if (Array.isArray(value)) normalized[name.toLowerCase()] = value.join("; ");
+  }
   return normalized;
 }
 
+/** @param {AppOptions} [options] */
 export function createApp(options = {}) {
   const { database: injectedDatabase, now, randomToken, ...configOptions } = options;
   const config = createConfig(configOptions);
@@ -43,6 +102,10 @@ export function createApp(options = {}) {
   const auth = new AuthService({ repository, database, config, now, randomToken });
   const ownDatabase = !injectedDatabase;
 
+  /**
+   * @param {string} token
+   * @param {number} maxAgeSeconds
+   */
   function sessionCookie(token, maxAgeSeconds) {
     const attributes = [
       `${config.cookieName}=${encodeURIComponent(token)}`,
@@ -55,6 +118,10 @@ export function createApp(options = {}) {
     return attributes.join("; ");
   }
 
+  /**
+   * @param {AppRequest} request
+   * @returns {Promise<AppResponse>}
+   */
   async function handle(request) {
     try {
       const method = (request.method || "GET").toUpperCase();
@@ -92,6 +159,7 @@ export function createApp(options = {}) {
 
   return {
     handle,
+    /** @param {AppRequest} request */
     async inject(request) {
       const result = await handle(request);
       return {

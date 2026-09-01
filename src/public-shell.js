@@ -1,7 +1,12 @@
+/** @typedef {{id: string, username: string}} Account */
+
+/** @param {unknown} value */
 function escapeHtml(value) {
-  return String(value).replace(/[&<>'"]/g, (character) => ({
+  /** @type {Record<string, string>} */
+  const entities = {
     "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
-  })[character]);
+  };
+  return String(value).replace(/[&<>'"]/g, (character) => entities[character] || character);
 }
 
 const clientScript = `<script>
@@ -22,6 +27,7 @@ const clientScript = `<script>
   });
 </script>`;
 
+/** @param {Account | undefined} account */
 export function renderShell(account) {
   const main = account
     ? `<p>Signed in as <strong>${escapeHtml(account.username)}</strong>.</p>

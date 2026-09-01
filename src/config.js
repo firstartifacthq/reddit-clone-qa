@@ -1,13 +1,31 @@
+/**
+ * @typedef {object} Config
+ * @property {string} databasePath
+ * @property {number} port
+ * @property {number} sessionLifetimeMs
+ * @property {string} cookieName
+ * @property {boolean} secureCookies
+ */
+
+// The supported Node runtime supplies process; application dependencies stay type-only and pinned.
+// @ts-expect-error Node globals are outside this JavaScript slice's ambient types.
+const environment = /** @type {Record<string, string | undefined>} */ (process.env);
+
+/** @type {Readonly<Config>} */
 const defaults = Object.freeze({
-  databasePath: process.env.DATABASE_PATH || "./reddit.sqlite",
-  port: Number(process.env.PORT || 3000),
-  sessionLifetimeMs: Number(process.env.SESSION_LIFETIME_MS || 3_600_000),
-  cookieName: process.env.SESSION_COOKIE_NAME || "reddit_session",
-  secureCookies: process.env.NODE_ENV === "production",
+  databasePath: environment.DATABASE_PATH || "./reddit.sqlite",
+  port: Number(environment.PORT || 3000),
+  sessionLifetimeMs: Number(environment.SESSION_LIFETIME_MS || 3_600_000),
+  cookieName: environment.SESSION_COOKIE_NAME || "reddit_session",
+  secureCookies: environment.NODE_ENV === "production",
 });
 
+/**
+ * @param {Partial<Config>} [overrides]
+ * @returns {Readonly<Config>}
+ */
 export function createConfig(overrides = {}) {
-  const config = { ...defaults, ...overrides };
+  const config = /** @type {Config} */ ({ ...defaults, ...overrides });
   if (typeof config.databasePath !== "string" || config.databasePath.length === 0) {
     throw new TypeError("databasePath must be a non-empty string");
   }
