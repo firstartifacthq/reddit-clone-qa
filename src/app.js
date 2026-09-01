@@ -6,19 +6,21 @@ import { ProfileRepository } from "./profile/profile-repository.js";
 import { ProfileService } from "./profile/profile-service.js";
 import { CommunityRepository } from "./community/community-repository.js";
 import { CommunityService } from "./community/community-service.js";
+import { PostRepository } from "./post/post-repository.js";
+import { PostService } from "./post/post-service.js";
 import { canonicalCommunityName } from "./community/community-validation.js";
 import { normalizeUsername } from "./account/username.js";
 import {
   authenticationError, forbiddenError, invalidCommunityError, invalidCredentialsError, invalidProfileError,
-  invalidRequestError, notFoundError, profileUnavailableError,
+  invalidRequestError, notFoundError, profileUnavailableError, invalidPostError, postConflictError, postUnavailableError,
 } from "./http-errors.js";
 import { renderShell } from "./public-shell.js";
 
 /** @typedef {{exec: (sql: string) => void, prepare: (sql: string) => any, close: () => void}} Database */
-/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string}} AppOptions */
+/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string, beforeMediaPersist?: () => void}} AppOptions */
 /** @typedef {Record<string, string | string[] | undefined>} RequestHeaders */
-/** @typedef {{method?: string, path?: string, headers?: RequestHeaders, payload?: string}} AppRequest */
-/** @typedef {{status: number, headers: Record<string, string>, body: string}} AppResponse */
+/** @typedef {{method?: string, path?: string, headers?: RequestHeaders, payload?: string | Uint8Array}} AppRequest */
+/** @typedef {{status: number, headers: Record<string, string>, body: string | Uint8Array}} AppResponse */
 
 /** @param {number} status @param {unknown} body @param {Record<string, string>} [headers] @returns {AppResponse} */
 function json(status, body, headers = {}) {
@@ -26,6 +28,8 @@ function json(status, body, headers = {}) {
 }
 /** @param {string} body @returns {AppResponse} */
 function html(body) { return { status: 200, headers: { "content-type": "text/html; charset=utf-8" }, body }; }
+/** @param {string} contentType @param {Uint8Array} body @returns {AppResponse} */
+function binary(contentType, body) { return { status: 200, headers: { "content-type": contentType }, body }; }
 /** @param {number} status @returns {AppResponse} */
 function empty(status) { return { status, headers: {}, body: "" }; }
 /** @param {unknown} header @returns {Record<string, string>} */
@@ -40,8 +44,12 @@ function parseCookies(header) {
 }
 /** @param {unknown} payload @returns {unknown} */
 function parseJson(payload) {
-  if (typeof payload !== "string" || payload.length > 16_384) return undefined;
-  try { return JSON.parse(payload); } catch { return undefined; }
+  if (typeof payload === "string") {
+    if (payload.length > 16_384) return undefined;
+    try { return JSON.parse(payload); } catch { return undefined; }
+  }
+  if (!(payload instanceof Uint8Array) || payload.length > 16_384) return undefined;
+  try { return JSON.parse(new TextDecoder().decode(payload)); } catch { return undefined; }
 }
 /** @param {RequestHeaders} headers @returns {Record<string, string>} */
 function headersFacade(headers) {
@@ -66,6 +74,14 @@ function communityPath(pathname, suffix) {
   if (!match) return null;
   try { return canonicalCommunityName(decodeURIComponent(match[1])); } catch { return undefined; }
 }
+/** @param {string} pathname @returns {{id: string, media: boolean} | undefined} */
+function postPath(pathname) {
+  const match = /^\/api\/posts\/([^/]+)(\/media)?$/.exec(pathname);
+  if (!match) return undefined;
+  try { return { id: decodeURIComponent(match[1]), media: Boolean(match[2]) }; } catch { return undefined; }
+}
+/** @param {string | undefined} contentType */
+function isJsonContentType(contentType) { return typeof contentType === "string" && contentType.split(";", 1)[0].trim().toLowerCase() === "application/json"; }
 
 /** @param {AppOptions} [options] */
 export function createApp(options = {}) {
@@ -75,9 +91,11 @@ export function createApp(options = {}) {
   const authRepository = new AuthRepository(database);
   const profileRepository = new ProfileRepository(database);
   const communityRepository = new CommunityRepository(database);
+  const postRepository = new PostRepository(database);
   const auth = new AuthService({ repository: authRepository, database, config, now, randomToken });
   const profiles = new ProfileService({ repository: profileRepository, database, now });
   const communities = new CommunityService({ repository: communityRepository, database, now });
+  const posts = new PostService({ repository: postRepository, database, beforeMediaPersist: options.beforeMediaPersist });
   const ownDatabase = !injectedDatabase;
 
   /** @param {string} token @param {number} maxAgeSeconds */
@@ -187,6 +205,53 @@ export function createApp(options = {}) {
         if (result.kind === "forbidden") return json(403, forbiddenError);
         return json(200, { entries: [] });
       }
+      const postCommunity = communityPath(url.pathname, "/posts");
+      if (method === "POST" && postCommunity !== null) {
+        if (!account) return json(401, authenticationError);
+        if (!postCommunity) return json(404, notFoundError);
+        if (!posts.canCreate(account.id, postCommunity)) return json(403, forbiddenError);
+        if (!isJsonContentType(headers["content-type"])) return json(422, invalidPostError);
+        const result = posts.create(account.id, postCommunity, request.payload, headers["idempotency-key"]);
+        if (result.kind === "success") return json(201, result.post);
+        if (result.kind === "forbidden") return json(403, forbiddenError);
+        if (result.kind === "conflict") return json(409, postConflictError);
+        if (result.kind === "too-large") return json(413, invalidPostError);
+        if (result.kind === "invalid") return json(422, invalidPostError);
+        return json(503, postUnavailableError);
+      }
+      const postRoute = postPath(url.pathname);
+      if (postRoute && method === "GET") {
+        if (postRoute.media) {
+          const media = posts.media(postRoute.id);
+          return media ? binary(media.media_content_type, media.media_bytes) : json(404, notFoundError);
+        }
+        const post = posts.get(postRoute.id);
+        return post ? json(200, post) : json(404, notFoundError);
+      }
+      if (postRoute && method === "PATCH") {
+        if (!account) return json(401, authenticationError);
+        if (postRoute.media) return json(404, notFoundError);
+        const admission = posts.authorizeMutation(account.id, postRoute.id);
+        if (admission === "not-found") return json(404, notFoundError);
+        if (admission === "forbidden") return json(403, forbiddenError);
+        if (!isJsonContentType(headers["content-type"])) return json(422, invalidPostError);
+        const result = posts.edit(account.id, postRoute.id, request.payload);
+        if (result.kind === "success") return json(200, result.post);
+        if (result.kind === "not-found") return json(404, notFoundError);
+        if (result.kind === "forbidden") return json(403, forbiddenError);
+        if (result.kind === "too-large") return json(413, invalidPostError);
+        if (result.kind === "invalid") return json(422, invalidPostError);
+        return json(503, postUnavailableError);
+      }
+      if (postRoute && method === "DELETE") {
+        if (!account) return json(401, authenticationError);
+        if (postRoute.media) return json(404, notFoundError);
+        const result = posts.delete(account.id, postRoute.id);
+        if (result.kind === "success") return empty(204);
+        if (result.kind === "not-found") return json(404, notFoundError);
+        if (result.kind === "forbidden") return json(403, forbiddenError);
+        return json(503, postUnavailableError);
+      }
       if (method === "GET" && url.pathname === "/api/communities") return json(200, { communities: communities.list() });
       if (method === "GET" && url.pathname === "/") return html(renderShell(account));
       return json(404, notFoundError);
@@ -200,7 +265,14 @@ export function createApp(options = {}) {
     /** @param {AppRequest} request */
     async inject(request) {
       const result = await handle(request);
-      return { statusCode: result.status, headers: new Headers(result.headers), text: async () => result.body, json: async () => JSON.parse(result.body) };
+      const bytes = result.body instanceof Uint8Array ? result.body : new TextEncoder().encode(result.body);
+      return {
+        statusCode: result.status,
+        headers: new Headers(result.headers),
+        text: async () => new TextDecoder().decode(bytes),
+        bytes: async () => new Uint8Array(bytes),
+        json: async () => JSON.parse(new TextDecoder().decode(bytes)),
+      };
     },
     config,
     database,

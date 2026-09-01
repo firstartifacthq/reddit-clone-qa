@@ -22,6 +22,7 @@ function migration(name) {
 const baselineMigration = migration("001-auth.sql");
 const profileMigration = migration("002-profile-lifecycle.sql");
 const communityMigration = migration("003-community-roles.sql");
+const postMigration = migration("004-posts.sql");
 
 /** @param {Database} database */
 function assertCommunityOwnerInvariant(database) {
@@ -50,6 +51,16 @@ function assertCommunityOwnerInvariant(database) {
   if (triggerCount !== 6 || invalidState) throw new Error("community owner invariant is invalid");
 }
 
+/** @param {Database} database */
+function assertPostInvariant(database) {
+  const invalid = database.prepare(`SELECT 1 FROM posts WHERE NOT (
+    (type = 'text' AND text_content IS NOT NULL AND url_content IS NULL AND media_filename IS NULL AND media_content_type IS NULL AND media_bytes IS NULL) OR
+    (type = 'link' AND text_content IS NULL AND url_content IS NOT NULL AND media_filename IS NULL AND media_content_type IS NULL AND media_bytes IS NULL) OR
+    (type = 'media' AND text_content IS NULL AND url_content IS NULL AND media_filename IS NOT NULL AND media_content_type IN ('image/jpeg', 'image/png', 'image/gif', 'image/webp') AND media_bytes IS NOT NULL)
+  ) LIMIT 1`).get();
+  if (invalid) throw new Error("post invariant is invalid");
+}
+
 /**
  * @param {string} path
  * @returns {Database}
@@ -59,7 +70,7 @@ export function openDatabase(path) {
   try {
     database.exec("PRAGMA foreign_keys = ON; BEGIN IMMEDIATE");
     const version = /** @type {{user_version: number}} */ (database.prepare("PRAGMA user_version").get()).user_version;
-    if (version > 3) throw new Error("Unsupported database schema version");
+    if (version > 4) throw new Error("Unsupported database schema version");
     if (version === 0) {
       database.exec(baselineMigration);
       database.exec("PRAGMA user_version = 1");
@@ -72,7 +83,12 @@ export function openDatabase(path) {
       database.exec(communityMigration);
       database.exec("PRAGMA user_version = 3");
     }
+    if (version <= 3) {
+      database.exec(postMigration);
+      database.exec("PRAGMA user_version = 4");
+    }
     assertCommunityOwnerInvariant(database);
+    assertPostInvariant(database);
     database.exec("COMMIT");
     return database;
   } catch (error) {
