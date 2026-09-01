@@ -35,6 +35,13 @@ function safeAccount(body) {
   assert.equal(body.username, credentials.username);
 }
 
+function safeOwnerProfile(body) {
+  assert.deepEqual(Object.keys(body).sort(), ["bio", "id", "revision", "username"]);
+  assert.equal(body.username, credentials.username);
+  assert.equal(body.bio, "");
+  assert.equal(body.revision, 0);
+}
+
 async function json(path, body, cookie) {
   return {
     path,
@@ -53,7 +60,7 @@ test("H1 valid signup and login establish a reload-stable shell", async () => {
     const signupCookie = cookieFrom(signup);
     const signupMe = await request("/api/me", { headers: { cookie: signupCookie } });
     assert.equal(signupMe.statusCode, 200);
-    safeAccount(await signupMe.json());
+    safeOwnerProfile(await signupMe.json());
     assert.match(await (await request("/", { headers: { cookie: signupCookie } })).text(), /Account/);
 
     const login = await request("/api/auth/login", await json("/api/auth/login", credentials));
@@ -62,7 +69,7 @@ test("H1 valid signup and login establish a reload-stable shell", async () => {
     const loginCookie = cookieFrom(login);
     const loginMe = await request("/api/me", { headers: { cookie: loginCookie } });
     assert.equal(loginMe.statusCode, 200);
-    safeAccount(await loginMe.json());
+    safeOwnerProfile(await loginMe.json());
     assert.match(await (await request("/", { headers: { cookie: loginCookie } })).text(), /Account/);
 
     for (const response of [signup, login, signupMe, loginMe]) {
@@ -146,7 +153,7 @@ test("H6 interrupted login is safely retryable", async () => {
     assert.deepEqual(await retry.json(), original);
     const me = await request("/api/me", { headers: { cookie: cookieFrom(retry) } });
     assert.equal(me.statusCode, 200);
-    safeAccount(await me.json());
+    safeOwnerProfile(await me.json());
     assert.equal(app.accountCount(), 1);
   });
 });

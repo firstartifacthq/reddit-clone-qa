@@ -11,10 +11,30 @@ import { DatabaseSync } from "node:sqlite";
  * @property {() => void} close
  */
 
-const migration = readFileSync(new URL("../migrations/001-auth.sql", import.meta.url), "utf8")
+const bootstrapMigration = readFileSync(new URL("../migrations/001-auth.sql", import.meta.url), "utf8")
   .replace("CREATE TABLE users", "CREATE TABLE IF NOT EXISTS users")
   .replace("CREATE TABLE sessions", "CREATE TABLE IF NOT EXISTS sessions")
   .replace("CREATE INDEX sessions_user_id", "CREATE INDEX IF NOT EXISTS sessions_user_id");
+const profileMigration = readFileSync(new URL("../migrations/002-profiles.sql", import.meta.url), "utf8");
+
+/**
+ * @param {Database} database
+ */
+function migrate(database) {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    database.exec(bootstrapMigration);
+    const version = /** @type {{user_version: number}} */ (database.prepare("PRAGMA user_version").get()).user_version;
+    if (version < 2) {
+      database.exec(profileMigration);
+      database.exec("PRAGMA user_version = 2");
+    }
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch {}
+    throw error;
+  }
+}
 
 /**
  * @param {string} path
@@ -22,6 +42,11 @@ const migration = readFileSync(new URL("../migrations/001-auth.sql", import.meta
  */
 export function openDatabase(path) {
   const database = new DatabaseSync(path);
-  database.exec(migration);
-  return database;
+  try {
+    migrate(database);
+    return database;
+  } catch (error) {
+    database.close();
+    throw error;
+  }
 }
