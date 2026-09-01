@@ -1,5 +1,6 @@
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
-const maxPayloadBytes = 65_536;
+// This includes 10,000 astral code points escaped as 12-byte JSON surrogate pairs plus the fixed object envelope.
+const maxPayloadBytes = 128 * 1_024;
 
 /** @param {string | Uint8Array | undefined} raw */
 export function parseCommentJson(raw) {

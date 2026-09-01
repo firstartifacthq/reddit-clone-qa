@@ -64,11 +64,32 @@ function assertPostInvariant(database) {
 
 /** @param {Database} database */
 function assertCommentInvariant(database) {
+  const triggerCount = database.prepare(`SELECT COUNT(*) AS count FROM sqlite_schema
+    WHERE type = 'trigger' AND name IN (
+      'comments_parent_has_same_post_and_depth',
+      'comments_root_has_zero_depth',
+      'comments_structure_is_immutable',
+      'comments_deletion_is_one_way',
+      'comment_traversal_item_matches_post',
+      'comment_traversal_item_is_immutable',
+      'comment_traversal_post_is_immutable'
+    )`).get().count;
+  const traversalItemForeignKeys = /** @type {{table: string, from: string, to: string}[]} */ (
+    database.prepare("PRAGMA foreign_key_list(comment_traversal_items)").all());
+  const hasCommentForeignKey = traversalItemForeignKeys.some((foreignKey) =>
+    foreignKey.table === "comments" && foreignKey.from === "comment_id" && foreignKey.to === "id");
   const invalid = database.prepare(`SELECT 1 FROM comments WHERE NOT (
     (state = 'active' AND author_user_id IS NOT NULL AND body IS NOT NULL) OR
     (state = 'deleted' AND author_user_id IS NULL AND body IS NULL)
-  ) LIMIT 1`).get();
-  if (invalid) throw new Error("comment invariant is invalid");
+  )
+  UNION ALL
+  SELECT 1
+  FROM comment_traversal_items AS item
+  LEFT JOIN comment_traversals AS traversal ON traversal.id = item.traversal_id
+  LEFT JOIN comments AS comment ON comment.id = item.comment_id
+  WHERE traversal.id IS NULL OR comment.id IS NULL OR traversal.post_id <> comment.post_id
+  LIMIT 1`).get();
+  if (triggerCount !== 7 || !hasCommentForeignKey || invalid) throw new Error("comment invariant is invalid");
 }
 
 /**

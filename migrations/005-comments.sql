@@ -39,6 +39,13 @@ BEGIN
   SELECT RAISE(ABORT, 'comment structure is immutable');
 END;
 
+CREATE TRIGGER comments_deletion_is_one_way
+BEFORE UPDATE OF state ON comments
+WHEN OLD.state = 'deleted' AND NEW.state <> 'deleted'
+BEGIN
+  SELECT RAISE(ABORT, 'deleted comments cannot be restored');
+END;
+
 CREATE TABLE comment_traversals (
   id TEXT PRIMARY KEY NOT NULL,
   post_id TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE
@@ -47,10 +54,34 @@ CREATE TABLE comment_traversals (
 CREATE TABLE comment_traversal_items (
   traversal_id TEXT NOT NULL REFERENCES comment_traversals(id) ON DELETE CASCADE,
   ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-  comment_id TEXT NOT NULL,
+  comment_id TEXT NOT NULL REFERENCES comments(id),
   PRIMARY KEY (traversal_id, ordinal),
   UNIQUE (traversal_id, comment_id)
 );
+
+CREATE TRIGGER comment_traversal_item_matches_post
+BEFORE INSERT ON comment_traversal_items
+WHEN NOT EXISTS (
+  SELECT 1
+  FROM comment_traversals AS traversal
+  JOIN comments AS comment ON comment.id = NEW.comment_id
+  WHERE traversal.id = NEW.traversal_id AND traversal.post_id = comment.post_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'traversal item must belong to traversal post');
+END;
+
+CREATE TRIGGER comment_traversal_item_is_immutable
+BEFORE UPDATE OF traversal_id, ordinal, comment_id ON comment_traversal_items
+BEGIN
+  SELECT RAISE(ABORT, 'traversal item is immutable');
+END;
+
+CREATE TRIGGER comment_traversal_post_is_immutable
+BEFORE UPDATE OF post_id ON comment_traversals
+BEGIN
+  SELECT RAISE(ABORT, 'traversal post is immutable');
+END;
 
 CREATE TABLE comment_page_tokens (
   token TEXT PRIMARY KEY NOT NULL,

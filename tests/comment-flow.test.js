@@ -77,7 +77,11 @@ test("SCN-RC-05-H3 rejects invalid comment creation without persistence", async 
       await fixed(await send(request, path, "POST", body, owner.cookie), 422, "Invalid comment", ["marker", "invalid-marker"]);
       assert.equal(count(app, "comments"), 0);
     }
-    assert.equal((await send(request, path, "POST", { body: "x".repeat(10_000) }, owner.cookie)).statusCode, 201);
+    const astralBody = "\u{1F600}".repeat(10_000);
+    const direct = await send(request, path, "POST", { body: astralBody }, owner.cookie);
+    const escaped = await send(request, path, "POST", `{"body":"${"\\ud83d\\ude00".repeat(10_000)}"}`, owner.cookie);
+    assert.deepEqual([direct.statusCode, escaped.statusCode], [201, 201]);
+    assert.deepEqual([...(await direct.json()).body], [...(await escaped.json()).body]);
   });
 });
 
