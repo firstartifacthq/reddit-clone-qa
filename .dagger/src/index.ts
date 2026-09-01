@@ -53,10 +53,36 @@ export class Qualification {
   }
 
   @func()
+  async applicationTypecheck(source: Directory): Promise<string> {
+    const repository = source.withoutDirectory(".crabbox").withoutDirectory(".devenv")
+    return dag.container()
+      .from(NODE_IMAGE)
+      .withMountedDirectory("/src", repository)
+      .withWorkdir("/src")
+      .withExec(["npm", "ci"])
+      .withExec(["npm", "run", "typecheck"])
+      .stdout()
+  }
+
+  @func()
+  async applicationTest(source: Directory): Promise<string> {
+    const repository = source.withoutDirectory(".crabbox").withoutDirectory(".devenv")
+    return dag.container()
+      .from(NODE_IMAGE)
+      .withMountedDirectory("/src", repository)
+      .withWorkdir("/src")
+      .withExec(["npm", "ci"])
+      .withExec(["npm", "test"])
+      .stdout()
+  }
+
+  @func()
   async qualification(source: Directory): Promise<string> {
     const semgrep = await this.semgrep(source)
     const alint = await this.alint(source)
     const lsLint = await this.lsLint(source)
-    return [semgrep, alint, lsLint].filter(Boolean).join("\n")
+    const typecheck = await this.applicationTypecheck(source)
+    const test = await this.applicationTest(source)
+    return [semgrep, alint, lsLint, typecheck, test].filter(Boolean).join("\n")
   }
 }
