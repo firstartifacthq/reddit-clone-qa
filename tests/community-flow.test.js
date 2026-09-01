@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { Worker } from "node:worker_threads";
 import { createApp } from "../src/app.js";
 import { openDatabase } from "../src/database.js";
 
@@ -50,6 +51,64 @@ function snapshot(databasePath) {
   } finally {
     database.close();
   }
+}
+
+function waitForWorkerMessage(worker, type) {
+  return new Promise((resolve, reject) => {
+    const onMessage = (message) => {
+      if (message.type !== type) return;
+      cleanup();
+      resolve(message);
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const onExit = (code) => {
+      cleanup();
+      reject(new Error(`lock worker exited with code ${code} before ${type}`));
+    };
+    const cleanup = () => {
+      worker.off("message", onMessage);
+      worker.off("error", onError);
+      worker.off("exit", onExit);
+    };
+    worker.on("message", onMessage);
+    worker.on("error", onError);
+    worker.on("exit", onExit);
+  });
+}
+
+function createWriteLockWorker(databasePath) {
+  return new Worker(`
+    const { parentPort, workerData } = require("node:worker_threads");
+    const { DatabaseSync } = require("node:sqlite");
+    const database = new DatabaseSync(workerData.databasePath);
+    database.exec("PRAGMA busy_timeout = 0; BEGIN IMMEDIATE;");
+    parentPort.postMessage({ type: "locked", at: Date.now() });
+    parentPort.once("message", ({ releaseAfterMs }) => {
+      parentPort.postMessage({ type: "release-armed", at: Date.now() });
+      setTimeout(() => {
+        database.exec("COMMIT;");
+        database.close();
+        parentPort.postMessage({ type: "released", at: Date.now() });
+      }, releaseAfterMs);
+    });
+  `, { eval: true, workerData: { databasePath } });
+}
+
+function assertConstraintRejected(database, databasePath, before, { sql, parameters, errcode, message }) {
+  let rejection;
+  try {
+    database.prepare(sql).run(...parameters);
+  } catch (error) {
+    rejection = error;
+  }
+  assert.ok(rejection, `expected constraint rejection for: ${sql}`);
+  assert.equal(rejection.code, "ERR_SQLITE_ERROR");
+  assert.equal(rejection.errcode, errcode);
+  assert.match(rejection.message, message);
+  assert.deepEqual(snapshot(databasePath), before);
 }
 
 test("SCN-RC-03-H1 creates an owner-backed canonical community and publicly discovers it after reopen", async () => {
@@ -149,20 +208,39 @@ test("SCN-RC-03-H6 repeated and concurrent joins converge without downgrading ro
     const member = await signup(request, "joinmember");
     assert.equal((await requestJson(request, "/api/communities", "POST", { name: "join_room" }, owner.cookie)).statusCode, 201);
     const independent = createApp({ databasePath });
+    const lockWorker = createWriteLockWorker(databasePath);
     try {
       const independentRequest = (path, options = {}) => independent.inject({ path, ...options });
-      const joins = await Promise.all(Array.from({ length: 8 }, (_, index) => requestJson(
-        index % 2 === 0 ? request : independentRequest,
-        "/api/communities/join_room/members",
-        "POST",
-        {},
-        member.cookie,
-      )));
+      const locked = await waitForWorkerMessage(lockWorker, "locked");
+      const releaseArmed = waitForWorkerMessage(lockWorker, "release-armed");
+      const released = waitForWorkerMessage(lockWorker, "released");
+      lockWorker.postMessage({ releaseAfterMs: 300 });
+      await releaseArmed;
+
+      const joinStartedAt = Date.now();
+      const contendedJoin = await requestJson(independentRequest, "/api/communities/join_room/members", "POST", {}, member.cookie);
+      const joinCompletedAt = Date.now();
+      const lockReleased = await released;
+      assert.ok(locked.at <= joinStartedAt && joinStartedAt < lockReleased.at, "join starts while the independent writer holds the lock");
+      assert.ok(lockReleased.at <= joinCompletedAt, "join completes only after the independent writer releases the lock");
+      assert.ok(joinCompletedAt - joinStartedAt < 2_000, "busy wait remains bounded");
+
+      const joins = [contendedJoin];
+      for (let index = 0; index < 7; index += 1) {
+        joins.push(await requestJson(
+          index % 2 === 0 ? request : independentRequest,
+          "/api/communities/join_room/members",
+          "POST",
+          {},
+          member.cookie,
+        ));
+      }
       for (const response of joins) {
         assert.equal(response.statusCode, 200);
         assert.deepEqual(await response.json(), { community: { name: "join_room" }, membership: { username: member.account.username, role: "member" } });
       }
     } finally {
+      await lockWorker.terminate();
       independent.close();
     }
     assert.deepEqual(snapshot(databasePath), {
@@ -175,6 +253,69 @@ test("SCN-RC-03-H6 repeated and concurrent joins converge without downgrading ro
     const ownerJoin = await requestJson(request, "/api/communities/join_room/members", "POST", {}, owner.cookie);
     assert.equal(ownerJoin.statusCode, 200);
     assert.deepEqual((await ownerJoin.json()).membership, { username: owner.account.username, role: "owner" });
+  });
+});
+
+test("community storage rejects every invalid membership invariant without changing rows", async () => {
+  await withApp(async ({ databasePath, request }) => {
+    const owner = await signup(request, "constraintowner");
+    const member = await signup(request, "constraintmember");
+    const outsider = await signup(request, "constraintoutsider");
+    assert.equal((await requestJson(request, "/api/communities", "POST", { name: "constraint_room" }, owner.cookie)).statusCode, 201);
+    assert.equal((await requestJson(request, "/api/communities/constraint_room/members", "POST", {}, member.cookie)).statusCode, 200);
+
+    const database = openDatabase(databasePath);
+    try {
+      const users = Object.fromEntries(database.prepare("SELECT username, id FROM users").all().map((user) => [user.username, user.id]));
+      const before = snapshot(databasePath);
+      const attempts = [
+        {
+          sql: "INSERT INTO memberships (community_name, user_id, role) VALUES (?, ?, ?)",
+          parameters: ["constraint_room", users.constraintoutsider, "administrator"],
+          errcode: 275,
+          message: /CHECK constraint failed: role IN/,
+        },
+        {
+          sql: "INSERT INTO memberships (community_name, user_id, role) VALUES (?, ?, ?)",
+          parameters: ["constraint_room", users.constraintmember, "member"],
+          errcode: 1555,
+          message: /UNIQUE constraint failed: memberships\.community_name, memberships\.user_id/,
+        },
+        {
+          sql: "INSERT INTO memberships (community_name, user_id, role) VALUES (?, ?, ?)",
+          parameters: ["constraint_room", users.constraintoutsider, "owner"],
+          errcode: 2067,
+          message: /UNIQUE constraint failed: memberships\.community_name/,
+        },
+        {
+          sql: "UPDATE memberships SET role = 'member' WHERE community_name = ? AND user_id = ?",
+          parameters: ["constraint_room", users.constraintowner],
+          errcode: 1811,
+          message: /owner role cannot be changed/,
+        },
+        {
+          sql: "DELETE FROM memberships WHERE community_name = ? AND user_id = ?",
+          parameters: ["constraint_room", users.constraintowner],
+          errcode: 1811,
+          message: /owner membership cannot be deleted/,
+        },
+        {
+          sql: "INSERT INTO memberships (community_name, user_id, role) VALUES (?, ?, ?)",
+          parameters: ["missing_community", users.constraintoutsider, "member"],
+          errcode: 787,
+          message: /FOREIGN KEY constraint failed/,
+        },
+        {
+          sql: "INSERT INTO memberships (community_name, user_id, role) VALUES (?, ?, ?)",
+          parameters: ["constraint_room", "missing-user-id", "member"],
+          errcode: 787,
+          message: /FOREIGN KEY constraint failed/,
+        },
+      ];
+      for (const attempt of attempts) assertConstraintRejected(database, databasePath, before, attempt);
+    } finally {
+      database.close();
+    }
   });
 });
 
