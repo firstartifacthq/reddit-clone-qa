@@ -24,6 +24,7 @@ const profileMigration = migration("002-profile-lifecycle.sql");
 const communityMigration = migration("003-community-roles.sql");
 const postMigration = migration("004-posts.sql");
 const commentMigration = migration("005-comments.sql");
+const voteMigration = migration("006-votes.sql");
 const personalMigration = migration("006-personal-state.sql");
 
 /** @param {Database} database */
@@ -146,6 +147,35 @@ function assertPersonalInvariant(database) {
 }
 
 /** @param {Database} database */
+function assertVoteInvariant(database) {
+  const voteColumns = /** @type {{name: string, type: string, notnull: number, pk: number}[]} */ (database.prepare("PRAGMA table_info(post_votes)").all());
+  const expectedColumns = [
+    ["post_id", "TEXT", 1], ["voter_user_id", "TEXT", 2], ["value", "INTEGER", 0],
+  ];
+  const columnsValid = expectedColumns.every(([name, type, pk]) => voteColumns.some((column) =>
+    column.name === name && column.type === type && column.notnull === 1 && column.pk === pk));
+  const foreignKeys = /** @type {{table: string, from: string, to: string, on_delete: string}[]} */ (database.prepare("PRAGMA foreign_key_list(post_votes)").all());
+  const cascade = foreignKeys.some((foreignKey) => foreignKey.table === "posts" && foreignKey.from === "post_id" && foreignKey.to === "id" && foreignKey.on_delete === "CASCADE");
+  const voter = foreignKeys.some((foreignKey) => foreignKey.table === "users" && foreignKey.from === "voter_user_id" && foreignKey.to === "id");
+  const postColumns = /** @type {{name: string, type: string, notnull: number, dflt_value: string | null}[]} */ (database.prepare("PRAGMA table_info(posts)").all());
+  const postState = postColumns.find((column) => column.name === "voting_state");
+  const postStateColumnValid = postState?.type === "TEXT"
+    && postState.notnull === 1
+    && postState.dflt_value === "'unlocked'";
+  const voteSchema = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'post_votes'").get();
+  const voteChecked = typeof voteSchema?.sql === "string" && /CHECK\s*\(\s*value\s+IN\s*\(\s*-1\s*,\s*1\s*\)\s*\)/i.test(voteSchema.sql);
+  const postSchema = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'posts'").get();
+  const postStateChecked = typeof postSchema?.sql === "string"
+    && /CHECK\s*\(\s*voting_state\s+IN\s*\(\s*'unlocked'\s*,\s*'locked'\s*\)\s*\)/i.test(postSchema.sql);
+  const invalidVote = database.prepare("SELECT 1 FROM post_votes WHERE value NOT IN (-1, 1) LIMIT 1").get();
+  const invalidPostState = database.prepare("SELECT 1 FROM posts WHERE voting_state IS NULL OR voting_state NOT IN ('unlocked', 'locked') LIMIT 1").get();
+  if (!columnsValid || !cascade || !voter || !postStateColumnValid || !voteChecked
+      || !postStateChecked || invalidVote || invalidPostState) {
+    throw new Error("vote invariant is invalid");
+  }
+}
+
+/** @param {Database} database */
 function assertCommentInvariant(database) {
   const triggerCount = database.prepare(`SELECT COUNT(*) AS count FROM sqlite_schema
     WHERE type = 'trigger' AND name IN (
@@ -184,7 +214,7 @@ export function openDatabase(path) {
   try {
     database.exec("PRAGMA foreign_keys = ON; BEGIN IMMEDIATE");
     const version = /** @type {{user_version: number}} */ (database.prepare("PRAGMA user_version").get()).user_version;
-    if (version > 6) throw new Error("Unsupported database schema version");
+    if (version > 7) throw new Error("Unsupported database schema version");
     if (version === 0) {
       database.exec(baselineMigration);
       database.exec("PRAGMA user_version = 1");
@@ -206,12 +236,23 @@ export function openDatabase(path) {
       database.exec("PRAGMA user_version = 5");
     }
     if (version <= 5) {
+      database.exec(voteMigration);
       database.exec(personalMigration);
-      database.exec("PRAGMA user_version = 6");
+      database.exec("PRAGMA user_version = 7");
+    }
+    if (version === 6) {
+      const voteSchemaPresent = Boolean(database.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'post_votes'").get());
+      const personalTableCount = database.prepare(`SELECT COUNT(*) AS count FROM sqlite_schema
+        WHERE type = 'table' AND name IN ('saved_posts', 'post_history', 'personal_traversals', 'personal_traversal_items', 'personal_page_tokens', 'user_preferences')`).get().count;
+      if (voteSchemaPresent && personalTableCount === 0) database.exec(personalMigration);
+      else if (!voteSchemaPresent && personalTableCount === 6) database.exec(voteMigration);
+      else if (!voteSchemaPresent || personalTableCount !== 6) throw new Error("Ambiguous version 6 database schema");
+      database.exec("PRAGMA user_version = 7");
     }
     assertCommunityOwnerInvariant(database);
     assertPostInvariant(database);
     assertCommentInvariant(database);
+    assertVoteInvariant(database);
     assertPersonalInvariant(database);
     database.exec("COMMIT");
     return database;
