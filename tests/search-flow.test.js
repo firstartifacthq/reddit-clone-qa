@@ -72,6 +72,28 @@ test("SCN-RC-08-H2 narrows supported filters and treats no matches as success", 
   });
 });
 
+test("SCN-RC-08-H2 does not evaluate cross-type candidates returned by the retrieval boundary", () => {
+  let communityReads = 0;
+  let commentReads = 0;
+  const service = new SearchService({
+    repository: { list: () => [
+      { type: "community", canonicalName: "needle_hub", displayName: "Needle Hub" },
+      { type: "post", id: "post-1", title: "stale", text: null, url: null },
+      { type: "comment", id: "comment-1", body: "needle comment" },
+    ] },
+    readableCommunities: () => { communityReads += 1; return ["needle_hub"]; },
+    readPost: () => ({ id: "post-1", type: "text", title: "needle post", text: "body" }),
+    readComment: () => { commentReads += 1; return { id: "comment-1", state: "active", body: "needle comment" }; },
+  });
+
+  assert.deepEqual(service.search({ query: "needle", type: "post" }, undefined), {
+    kind: "success",
+    results: [{ type: "post", id: "post-1" }],
+  });
+  assert.equal(communityReads, 0);
+  assert.equal(commentReads, 0);
+});
+
 test("SCN-RC-08-H3 rejects invalid raw query forms before actor or corpus retrieval", async () => {
   let actorCalls = 0;
   let actorUnavailable = false;
@@ -273,5 +295,28 @@ test("SCN-RC-08-H7 matches only current direct-read text and excludes tombstones
       { type: "post", id: "post-current" },
       { type: "comment", id: "comment-current" },
     ],
+  });
+});
+
+test("SCN-RC-08-H1 applies Unicode case-insensitive matching without pattern semantics", () => {
+  const service = new SearchService({
+    repository: { list: () => [
+      { type: "post", id: "post-1", title: "stale", text: null, url: null },
+      { type: "post", id: "post-2", title: "stale", text: null, url: null },
+    ] },
+    readableCommunities: () => [],
+    readPost: (id) => id === "post-1"
+      ? { id, type: "text", title: "Greek final \u03c2", text: "body" }
+      : { id, type: "text", title: "literal [\u03c3]", text: "body" },
+    readComment: () => undefined,
+  });
+
+  assert.deepEqual(service.search({ query: "\u03a3" }, undefined), {
+    kind: "success",
+    results: [{ type: "post", id: "post-1" }, { type: "post", id: "post-2" }],
+  });
+  assert.deepEqual(service.search({ query: "[\u03a3]" }, undefined), {
+    kind: "success",
+    results: [{ type: "post", id: "post-2" }],
   });
 });

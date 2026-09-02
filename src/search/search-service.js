@@ -7,7 +7,9 @@ const typeRank = { community: 0, post: 1, comment: 2 };
 /** @param {string[]} values @param {string} query */
 function textMatches(values, query) {
   const needle = query.toLowerCase();
-  return values.some((value) => value.toLowerCase().includes(needle));
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const unicodeCaselessLiteral = new RegExp(escaped, "iu");
+  return values.some((value) => value.toLowerCase().includes(needle) || unicodeCaselessLiteral.test(value));
 }
 
 /** @param {SearchCandidate & {type: "community"}} candidate @param {string} query */
@@ -61,6 +63,7 @@ export class SearchService {
       /** @type {Map<string, SearchResult>} */
       const results = new Map();
       for (const candidate of this.repository.list(searchQuery.type)) {
+        if (searchQuery.type && candidate.type !== searchQuery.type) continue;
         let currentMatch;
         if (candidate.type === "community") {
           const admittedCommunities = readableCommunities || new Set(this.readableCommunities(actor));
