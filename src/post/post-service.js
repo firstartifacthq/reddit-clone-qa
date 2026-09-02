@@ -69,19 +69,19 @@ export class PostService {
   /** @param {string} userId @param {string} id */
   authorizeMutation(userId, id) {
     const post = this.repository.findPost(id);
-    if (!post) return "not-found";
+    if (!post || post.moderation_state !== "visible") return "not-found";
     return post.author_user_id === userId ? "allowed" : "forbidden";
   }
 
   /** @param {string} id */
-  get(id) { const post = this.repository.findPost(id); return post ? postRepresentation(post) : undefined; }
+  get(id) { const post = this.repository.findReadablePost(id); return post ? postRepresentation(post) : undefined; }
   /** @param {string} id */
   media(id) { return this.repository.findMedia(id); }
 
   /** @param {string} userId @param {string} id @param {string | Uint8Array | undefined} rawBody */
   edit(userId, id, rawBody) {
     const current = this.repository.findPost(id);
-    if (!current) return { kind: "not-found" };
+    if (!current || current.moderation_state !== "visible") return { kind: "not-found" };
     if (current.author_user_id !== userId) return { kind: "forbidden" };
     const validation = validatePostPatch(current.type, parseBody(rawBody));
     if (validation.kind !== "valid") return validation.kind === "too-large" ? { kind: "too-large" } : { kind: "invalid" };

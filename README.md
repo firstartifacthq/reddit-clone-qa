@@ -37,6 +37,11 @@ Optional non-secret configuration is captured when the application starts:
 - `GET /api/communities/:canonicalName/modlog`
 - `POST /api/communities/:canonicalName/posts`
 - `GET`, `PATCH`, and `DELETE /api/posts/:id`
+- `POST /api/posts/:id/reports`
+- `GET /api/mod/queue`
+- `DELETE /api/mod/posts/:id`
+- `POST /api/mod/posts/:id/restore`
+- `GET /api/mod/audit/:eventId`
 - `GET`, `PUT`, and `DELETE /api/posts/:id/vote`
 - `GET /api/posts/:id/media`
 - `POST`, `GET /api/posts/:id/comments`
@@ -54,6 +59,8 @@ Authenticated active users can create a community with a 3 through 21 character 
 Current members can publish JSON text, HTTP(S) link, or image media posts. Media uploads use canonical base64 in the JSON request and are stored with their metadata in the local SQLite database; media reads return the accepted bytes with their declared image content type. Post creation accepts an optional `Idempotency-Key` for safe retries. Only the author can edit declared-form fields or delete a post.
 
 Authenticated active users can set or replace their own vote as JSON `{ "value": 1 }` or `{ "value": -1 }` on another active author's unlocked post, inspect their current vote, or clear it. Vote score and author karma are derived from current durable votes; no vote ledger or aggregate override route is exposed.
+
+Active community members can report a readable post once while the report remains open, using an exact JSON `{ "reason": "..." }` body. Current owners and moderators receive authority-scoped, opaque stable report queues. They can reversibly remove and restore posts: removal hides the post from ordinary post, media, comment, search, personal, and vote reads, resolves open reports, and appends immutable audit evidence; restoration restores the same preserved content without reopening reports.
 
 Active community members can add JSON comments to a readable post, either top-level or with a same-post `parentId`. Conversations are depth-first pre-order pages; `limit` defaults to 25 and accepts 1 through 100. Returned cursors are opaque, resumable snapshots, so later comments do not enter an existing traversal. Comment authors may edit active comments or replace them with privacy-preserving tombstones while descendants retain their original nesting.
 

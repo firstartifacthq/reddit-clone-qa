@@ -8,14 +8,16 @@
 export class CommentRepository {
   /** @param {Database} database */
   constructor(database) {
-    this.postExists = database.prepare("SELECT 1 FROM posts WHERE id = ?");
-    this.memberForPost = database.prepare(`SELECT 1 FROM posts
+    this.postExists = database.prepare("SELECT 1 FROM readable_posts WHERE id = ?");
+    this.memberForPost = database.prepare(`SELECT 1 FROM readable_posts AS posts
       JOIN community_memberships AS membership ON membership.community_name = posts.community_name
       JOIN users ON users.id = membership.user_id AND users.deletion_requested_at IS NULL
       WHERE posts.id = ? AND membership.user_id = ?`);
     this.commentById = database.prepare(`SELECT comments.*, users.username FROM comments
+      JOIN readable_posts AS posts ON posts.id = comments.post_id
       LEFT JOIN users ON users.id = comments.author_user_id WHERE comments.id = ?`);
-    this.mutationAdmission = database.prepare("SELECT author_user_id, state FROM comments WHERE id = ?");
+    this.mutationAdmission = database.prepare(`SELECT comments.author_user_id, comments.state FROM comments
+      JOIN readable_posts AS posts ON posts.id = comments.post_id WHERE comments.id = ?`);
     this.parentById = database.prepare("SELECT id, post_id, depth FROM comments WHERE id = ?");
     this.nextSequence = database.prepare("SELECT COALESCE(MAX(created_sequence), 0) + 1 AS value FROM comments");
     this.insertComment = database.prepare(`INSERT INTO comments (id, post_id, parent_id, author_user_id, body, depth, state, created_sequence)

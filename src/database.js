@@ -26,6 +26,7 @@ const postMigration = migration("004-posts.sql");
 const commentMigration = migration("005-comments.sql");
 const voteMigration = migration("006-votes.sql");
 const personalMigration = migration("006-personal-state.sql");
+const moderationMigration = migration("008-moderation.sql");
 
 /** @param {Database} database */
 function assertCommunityOwnerInvariant(database) {
@@ -176,6 +177,23 @@ function assertVoteInvariant(database) {
 }
 
 /** @param {Database} database */
+function assertModerationInvariant(database) {
+  const state = database.prepare("PRAGMA table_info(posts)").all().find((/** @type {any} */ column) => column.name === "moderation_state");
+  const view = normalizedSql(database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'view' AND name = 'readable_posts'").get()?.sql || "");
+  const triggers = database.prepare(`SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'trigger' AND name IN (
+    'reports_cannot_reopen', 'moderation_audit_events_are_immutable', 'moderation_audit_events_cannot_be_deleted',
+    'moderation_traversals_are_immutable', 'moderation_traversal_items_are_immutable', 'moderation_page_tokens_are_immutable'
+  )`).get().count;
+  const invalid = database.prepare(`SELECT 1 FROM posts WHERE moderation_state NOT IN ('visible', 'removed')
+    UNION ALL SELECT 1 FROM reports WHERE (state = 'open' AND resolved_at IS NOT NULL) OR (state = 'resolved' AND resolved_at IS NULL)
+    UNION ALL SELECT 1 FROM moderation_audit_events WHERE action NOT IN ('remove', 'restore')
+    LIMIT 1`).get();
+  if (state?.type !== "TEXT" || state.notnull !== 1 || state.dflt_value !== "'visible'" ||
+    !view.includes("select * from posts where moderation_state = 'visible'") || triggers !== 6 || invalid ||
+    database.prepare("PRAGMA foreign_key_check").get()) throw new Error("moderation invariant is invalid");
+}
+
+/** @param {Database} database */
 function assertCommentInvariant(database) {
   const triggerCount = database.prepare(`SELECT COUNT(*) AS count FROM sqlite_schema
     WHERE type = 'trigger' AND name IN (
@@ -214,7 +232,7 @@ export function openDatabase(path) {
   try {
     database.exec("PRAGMA foreign_keys = ON; BEGIN IMMEDIATE");
     const version = /** @type {{user_version: number}} */ (database.prepare("PRAGMA user_version").get()).user_version;
-    if (version > 7) throw new Error("Unsupported database schema version");
+    if (version > 8) throw new Error("Unsupported database schema version");
     if (version === 0) {
       database.exec(baselineMigration);
       database.exec("PRAGMA user_version = 1");
@@ -249,11 +267,16 @@ export function openDatabase(path) {
       else if (!voteSchemaPresent || personalTableCount !== 6) throw new Error("Ambiguous version 6 database schema");
       database.exec("PRAGMA user_version = 7");
     }
+    if (version <= 7) {
+      database.exec(moderationMigration);
+      database.exec("PRAGMA user_version = 8");
+    }
     assertCommunityOwnerInvariant(database);
     assertPostInvariant(database);
     assertCommentInvariant(database);
     assertVoteInvariant(database);
     assertPersonalInvariant(database);
+    assertModerationInvariant(database);
     database.exec("COMMIT");
     return database;
   } catch (error) {

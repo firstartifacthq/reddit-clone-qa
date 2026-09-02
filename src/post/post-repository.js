@@ -11,16 +11,17 @@ export class PostRepository {
       JOIN users ON users.id = membership.user_id AND users.deletion_requested_at IS NULL
       WHERE membership.community_name = ? AND membership.user_id = ?`);
     this.postById = database.prepare(`SELECT posts.*, users.username FROM posts JOIN users ON users.id = posts.author_user_id WHERE posts.id = ?`);
-    this.mediaById = database.prepare("SELECT media_content_type, media_bytes FROM posts WHERE id = ? AND type = 'media'");
+    this.readablePostById = database.prepare(`SELECT posts.*, users.username FROM readable_posts AS posts JOIN users ON users.id = posts.author_user_id WHERE posts.id = ?`);
+    this.mediaById = database.prepare("SELECT media_content_type, media_bytes FROM readable_posts WHERE id = ? AND type = 'media'");
     this.idempotencyByKey = database.prepare("SELECT body_digest, response_json FROM post_idempotency WHERE author_user_id = ? AND community_name = ? AND idempotency_key = ?");
     this.insertPost = database.prepare(`INSERT INTO posts (id, community_name, author_user_id, type, title, text_content, url_content, media_filename, media_content_type, media_bytes)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     this.insertIdempotency = database.prepare(`INSERT INTO post_idempotency (author_user_id, community_name, idempotency_key, body_digest, post_id, response_json)
       VALUES (?, ?, ?, ?, ?, ?)`);
-    this.updateText = database.prepare("UPDATE posts SET title = COALESCE(?, title), text_content = COALESCE(?, text_content) WHERE id = ? AND author_user_id = ? RETURNING *");
-    this.updateLink = database.prepare("UPDATE posts SET title = COALESCE(?, title), url_content = COALESCE(?, url_content) WHERE id = ? AND author_user_id = ? RETURNING *");
+    this.updateText = database.prepare("UPDATE posts SET title = COALESCE(?, title), text_content = COALESCE(?, text_content) WHERE id = ? AND author_user_id = ? AND moderation_state = 'visible' RETURNING *");
+    this.updateLink = database.prepare("UPDATE posts SET title = COALESCE(?, title), url_content = COALESCE(?, url_content) WHERE id = ? AND author_user_id = ? AND moderation_state = 'visible' RETURNING *");
     this.updateMedia = database.prepare(`UPDATE posts SET title = COALESCE(?, title), media_filename = COALESCE(?, media_filename),
-      media_content_type = COALESCE(?, media_content_type), media_bytes = COALESCE(?, media_bytes) WHERE id = ? AND author_user_id = ? RETURNING *`);
+      media_content_type = COALESCE(?, media_content_type), media_bytes = COALESCE(?, media_bytes) WHERE id = ? AND author_user_id = ? AND moderation_state = 'visible' RETURNING *`);
     this.deleteByAuthor = database.prepare("DELETE FROM posts WHERE id = ? AND author_user_id = ?");
     this.countPosts = database.prepare("SELECT COUNT(*) AS count FROM posts");
   }
@@ -29,6 +30,8 @@ export class PostRepository {
   isPostingMember(community, userId) { return Boolean(this.postingMember.get(community, userId)); }
   /** @param {string} id */
   findPost(id) { return this.postById.get(id); }
+  /** @param {string} id */
+  findReadablePost(id) { return this.readablePostById.get(id); }
   /** @param {string} id */
   findMedia(id) { return this.mediaById.get(id); }
   /** @param {string} userId @param {string} community @param {string} key */
