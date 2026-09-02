@@ -13,6 +13,9 @@ import { CommentService } from "./comment/comment-service.js";
 import { SearchRepository } from "./search/search-repository.js";
 import { SearchService } from "./search/search-service.js";
 import { validateSearchQuery } from "./search/search-validation.js";
+import { VoteRepository } from "./vote/vote-repository.js";
+import { VoteService } from "./vote/vote-service.js";
+import { parseVoteJson, validateVote } from "./vote/vote-validation.js";
 import { validateCommentPage } from "./comment/comment-validation.js";
 import { canonicalCommunityName } from "./community/community-validation.js";
 import { normalizeUsername } from "./account/username.js";
@@ -20,11 +23,12 @@ import {
   authenticationError, forbiddenError, invalidCommunityError, invalidCredentialsError, invalidProfileError,
   invalidRequestError, notFoundError, profileUnavailableError, invalidPostError, postConflictError, postUnavailableError,
   invalidCommentError, invalidCommentPageError, commentUnavailableError, invalidSearchError, searchUnavailableError,
+  invalidVoteError, voteUnavailableError,
 } from "./http-errors.js";
 import { renderShell } from "./public-shell.js";
 
 /** @typedef {{exec: (sql: string) => void, prepare: (sql: string) => any, close: () => void}} Database */
-/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string, beforeAuthResolve?: () => void, beforeMediaPersist?: () => void, beforeCommentPersist?: () => void, searchRepository?: {list: (type?: "community" | "post" | "comment") => any[]}}} AppOptions */
+/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string, beforeAuthResolve?: () => void, beforeMediaPersist?: () => void, beforeCommentPersist?: () => void, beforeVotePersist?: () => void, searchRepository?: {list: (type?: "community" | "post" | "comment") => any[]}}} AppOptions */
 /** @typedef {Record<string, string | string[] | undefined>} RequestHeaders */
 /** @typedef {{method?: string, path?: string, headers?: RequestHeaders, payload?: string | Uint8Array}} AppRequest */
 /** @typedef {{status: number, headers: Record<string, string>, body: string | Uint8Array}} AppResponse */
@@ -88,6 +92,12 @@ function postPath(pathname) {
   try { return { id: decodeURIComponent(match[1]), media: Boolean(match[2]) }; } catch { return undefined; }
 }
 /** @param {string} pathname */
+function votePath(pathname) {
+  const match = /^\/api\/posts\/([^/]+)\/vote$/.exec(pathname);
+  if (!match) return undefined;
+  try { return decodeURIComponent(match[1]); } catch { return undefined; }
+}
+/** @param {string} pathname */
 function postCommentsPath(pathname) {
   const match = /^\/api\/posts\/([^/]+)\/comments$/.exec(pathname);
   if (!match) return undefined;
@@ -104,7 +114,10 @@ function isJsonContentType(contentType) { return typeof contentType === "string"
 
 /** @param {AppOptions} [options] */
 export function createApp(options = {}) {
-  const { database: injectedDatabase, now, randomToken, beforeAuthResolve, searchRepository: injectedSearchRepository, ...configOptions } = options;
+  const {
+    database: injectedDatabase, now, randomToken, beforeAuthResolve, beforeMediaPersist,
+    beforeCommentPersist, beforeVotePersist, searchRepository: injectedSearchRepository, ...configOptions
+  } = options;
   const config = createConfig(configOptions);
   const database = injectedDatabase || openDatabase(config.databasePath);
   const authRepository = new AuthRepository(database);
@@ -112,11 +125,13 @@ export function createApp(options = {}) {
   const communityRepository = new CommunityRepository(database);
   const postRepository = new PostRepository(database);
   const commentRepository = new CommentRepository(database);
+  const voteRepository = new VoteRepository(database);
   const auth = new AuthService({ repository: authRepository, database, config, now, randomToken, beforeResolve: beforeAuthResolve });
   const profiles = new ProfileService({ repository: profileRepository, database, now });
   const communities = new CommunityService({ repository: communityRepository, database, now });
-  const posts = new PostService({ repository: postRepository, database, beforeMediaPersist: options.beforeMediaPersist });
-  const comments = new CommentService({ repository: commentRepository, database, beforeCommentPersist: options.beforeCommentPersist });
+  const posts = new PostService({ repository: postRepository, database, beforeMediaPersist });
+  const comments = new CommentService({ repository: commentRepository, database, beforeCommentPersist });
+  const votes = new VoteService({ repository: voteRepository, database, beforeVotePersist });
   const search = new SearchService({
     repository: injectedSearchRepository || new SearchRepository(database),
     readableCommunities: (_actor) => communities.list(),
@@ -306,6 +321,34 @@ export function createApp(options = {}) {
         if (result.kind === "not-found") return json(404, notFoundError);
         if (result.kind === "forbidden") return json(403, forbiddenError);
         return json(503, commentUnavailableError);
+      }
+      const votePostId = votePath(url.pathname);
+      if (votePostId && method === "GET") {
+        if (!account) return json(401, authenticationError);
+        const vote = votes.get(account.id, votePostId);
+        return vote ? json(200, vote) : json(404, notFoundError);
+      }
+      if (votePostId && (method === "PUT" || method === "DELETE")) {
+        if (!account) return json(401, authenticationError);
+        // Target admission intentionally precedes media-type and JSON validation.
+        const admission = votes.authorize(account.id, votePostId, true);
+        if (admission === "not-found") return json(404, notFoundError);
+        if (admission === "forbidden") return json(403, forbiddenError);
+        if (method === "PUT") {
+          if (!isJsonContentType(headers["content-type"])) return json(422, invalidVoteError);
+          const value = validateVote(parseVoteJson(request.payload));
+          if (value === undefined) return json(422, invalidVoteError);
+          const result = votes.set(account.id, votePostId, value);
+          if (result.kind === "success") return json(200, result.vote);
+          if (result.kind === "not-found") return json(404, notFoundError);
+          if (result.kind === "forbidden") return json(403, forbiddenError);
+          return json(503, voteUnavailableError);
+        }
+        const result = votes.clear(account.id, votePostId);
+        if (result.kind === "success") return empty(204);
+        if (result.kind === "not-found") return json(404, notFoundError);
+        if (result.kind === "forbidden") return json(403, forbiddenError);
+        return json(503, voteUnavailableError);
       }
       const postRoute = postPath(url.pathname);
       if (postRoute && method === "GET") {

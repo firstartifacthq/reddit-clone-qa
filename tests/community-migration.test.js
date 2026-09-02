@@ -15,7 +15,7 @@ test("community migration creates version 4 and protects owner membership", asyn
   await withDirectory(async (directory) => {
     const path = join(directory, "fresh.sqlite");
     const database = openDatabase(path);
-    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 5);
+    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 6);
     const insertUser = database.prepare("INSERT INTO users (id, username, password_salt, password_verifier, created_at) VALUES (?, ?, ?, ?, ?)");
     insertUser.run("owner", "owner-user", "salt", "verifier", 1);
     insertUser.run("other", "other-user", "salt", "verifier", 1);
@@ -64,7 +64,7 @@ test("community migration upgrades a populated version 2 database", async () => 
       INSERT INTO users VALUES ('owner', 'owner-user', 'salt', 'verifier', 1, '', 0, NULL);`);
     legacy.close();
     const upgraded = openDatabase(path);
-    assert.equal(upgraded.prepare("PRAGMA user_version").get().user_version, 5);
+    assert.equal(upgraded.prepare("PRAGMA user_version").get().user_version, 6);
     assert.equal(upgraded.prepare("SELECT COUNT(*) AS count FROM communities").get().count, 0);
     upgraded.close();
   });
