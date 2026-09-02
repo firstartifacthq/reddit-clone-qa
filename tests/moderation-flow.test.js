@@ -156,6 +156,13 @@ function authorityKey(communities) {
 test("SCN-RC-09-H1 creates one trimmed durable report without an audit event", async () => withApp(async ({ app, request, path }) => {
   const { owner, reporter, post } = await fixture(request);
   const beforePost = { ...app.database.prepare("SELECT * FROM posts WHERE id = ?").get(post.id) };
+  await fixedError(await json(
+    request,
+    `/api/posts/${post.id}/reports`,
+    "POST",
+    '{"reason":"shadowed","reason":"useful reason"}',
+    reporter.cookie,
+  ), 422, "Invalid report", ["shadowed"]);
   const response = await reportPost(request, post, reporter, "  useful reason  ");
   assert.equal(response.statusCode, 201);
   const report = await response.json();

@@ -1,12 +1,30 @@
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
 
+/** @param {string} source */
+function hasOneTopLevelMember(source) {
+  let depth = 0; let members = 0; let inString = false; let escaped = false;
+  for (const character of source) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+    } else if (character === '"') inString = true;
+    else if (character === "{" || character === "[") depth += 1;
+    else if (character === "}" || character === "]") depth -= 1;
+    else if (character === ":" && depth === 1) members += 1;
+  }
+  return members === 1;
+}
+
 /** @param {string | Uint8Array | undefined} raw */
 export function parseReportJson(raw) {
   try {
     // @ts-expect-error Buffer is supplied by the supported Node runtime.
     const bytes = typeof raw === "string" ? Buffer.from(raw) : raw;
     if (!(bytes instanceof Uint8Array) || bytes.length > 16_384) return undefined;
-    return JSON.parse(strictUtf8.decode(bytes));
+    const source = strictUtf8.decode(bytes);
+    const value = JSON.parse(source);
+    return hasOneTopLevelMember(source) ? value : undefined;
   } catch { return undefined; }
 }
 
