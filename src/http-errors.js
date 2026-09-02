@@ -12,5 +12,7 @@ export const postUnavailableError = Object.freeze({ error: "Post service unavail
 export const invalidCommentError = Object.freeze({ error: "Invalid comment" });
 export const invalidCommentPageError = Object.freeze({ error: "Invalid comment page" });
 export const commentUnavailableError = Object.freeze({ error: "Comment service unavailable" });
+export const invalidSearchError = Object.freeze({ error: "Invalid search" });
+export const searchUnavailableError = Object.freeze({ error: "Search service unavailable" });
 export const invalidVoteError = Object.freeze({ error: "Invalid vote" });
 export const voteUnavailableError = Object.freeze({ error: "Vote service unavailable" });
