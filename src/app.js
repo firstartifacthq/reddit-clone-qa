@@ -36,7 +36,7 @@ import {
 import { renderShell } from "./public-shell.js";
 
 /** @typedef {{exec: (sql: string) => void, prepare: (sql: string) => any, close: () => void}} Database */
-/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string, beforeMediaPersist?: () => void, beforeCommentPersist?: () => void, beforeSavedPersist?: () => void, beforeHistoryPersist?: () => void, beforePreferencePersist?: () => void, beforeVotePersist?: () => void, beforeSearchRead?: () => void, beforeModerationPersist?: () => void}} AppOptions */
+/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string, beforeMediaPersist?: () => void, beforeCommentPersist?: () => void, beforeSavedPersist?: () => void, beforeHistoryPersist?: () => void, beforePreferencePersist?: () => void, beforeVotePersist?: () => void, beforeSearchRead?: () => void, beforeModerationPersist?: (phase: "post-state" | "resolve-reports" | "append-audit") => void}} AppOptions */
 /** @typedef {Record<string, string | string[] | undefined>} RequestHeaders */
 /** @typedef {{method?: string, path?: string, headers?: RequestHeaders, payload?: string | Uint8Array}} AppRequest */
 /** @typedef {{status: number, headers: Record<string, string>, body: string | Uint8Array}} AppResponse */

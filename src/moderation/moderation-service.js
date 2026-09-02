@@ -10,7 +10,7 @@ function rollback(database) { try { database.exec("ROLLBACK"); } catch {} }
 function authorityKey(communities) { return createHash("sha256").update(JSON.stringify([...communities].sort())).digest("hex"); }
 
 export class ModerationService {
-  /** @param {{repository: import("./moderation-repository.js").ModerationRepository, database: {exec: (sql: string) => void}, now?: () => number, beforeModerationPersist?: () => void}} options */
+  /** @param {{repository: import("./moderation-repository.js").ModerationRepository, database: {exec: (sql: string) => void}, now?: () => number, beforeModerationPersist?: (phase: "post-state" | "resolve-reports" | "append-audit") => void}} options */
   constructor({ repository, database, now = Date.now, beforeModerationPersist = () => {} }) {
     this.repository = repository; this.database = database; this.now = now; this.beforeModerationPersist = beforeModerationPersist;
   }
@@ -45,7 +45,6 @@ export class ModerationService {
   /** @param {string} userId @param {number} limit @param {string | undefined} cursor */
   queue(userId, limit, cursor) {
     const current = this.authorities(userId); if (!current.length) return { kind: "forbidden" };
-    const key = authorityKey(current);
     try {
       this.database.exec("BEGIN IMMEDIATE");
       // Every continuation is bound to the role set currently held by its requester.
@@ -59,7 +58,7 @@ export class ModerationService {
       } else {
         const rows = this.repository.currentReports(inside);
         if (!rows.length) { this.database.exec("COMMIT"); return { kind: "success", reports: [], nextCursor: null }; }
-        traversalId = randomUUID(); start = 0; const now = this.now(); this.repository.createTraversal(traversalId, userId, key, now, now + DAY_MS, rows);
+        traversalId = randomUUID(); start = 0; const now = this.now(); this.repository.createTraversal(traversalId, userId, currentKey, now, now + DAY_MS, rows);
       }
       const rows = this.repository.pageFor(traversalId, start, limit);
       const nextStart = rows.length ? rows.at(-1).ordinal + 1 : start;
@@ -69,17 +68,27 @@ export class ModerationService {
   }
   /** @param {string} userId @param {string} username @param {string} postId @param {"remove" | "restore"} action */
   transition(userId, username, postId, action) {
+    if (!this.authorities(userId).length) return { kind: "forbidden" };
     const target = this.repository.moderationTarget(postId);
-    if (!target) return { kind: "not-found" }; if (!this.repository.isModerator(target.community_name, userId)) return { kind: "forbidden" };
+    if (!target) return { kind: "not-found" };
+    if (!this.repository.isModerator(target.community_name, userId)) return { kind: "forbidden" };
     const desired = action === "remove" ? "removed" : "visible";
     try {
-      this.database.exec("BEGIN IMMEDIATE"); const inside = this.repository.moderationTarget(postId);
+      this.database.exec("BEGIN IMMEDIATE");
+      if (!this.authorities(userId).length) { rollback(this.database); return { kind: "forbidden" }; }
+      const inside = this.repository.moderationTarget(postId);
       if (!inside) { rollback(this.database); return { kind: "not-found" }; }
       if (!this.repository.isModerator(inside.community_name, userId)) { rollback(this.database); return { kind: "forbidden" }; }
       if (inside.moderation_state === desired) { this.database.exec("COMMIT"); return { kind: "success" }; }
-      this.beforeModerationPersist(); this.repository.setState(desired, postId); const now = this.now();
-      if (action === "remove") this.repository.resolveOpenReports(postId, now);
+      this.beforeModerationPersist("post-state");
+      this.repository.setState(desired, postId);
+      const now = this.now();
+      if (action === "remove") {
+        this.beforeModerationPersist("resolve-reports");
+        this.repository.resolveOpenReports(postId, now);
+      }
       const createdAt = Math.max(now, (this.repository.latestAuditFor(postId) ?? -1) + 1);
+      this.beforeModerationPersist("append-audit");
       this.repository.appendAudit({ id: randomUUID(), community: inside.community_name, postId, actor: username, action, createdAt });
       this.database.exec("COMMIT"); return { kind: "success" };
     } catch { rollback(this.database); return { kind: "unavailable" }; }
