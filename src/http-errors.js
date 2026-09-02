@@ -12,3 +12,6 @@ export const postUnavailableError = Object.freeze({ error: "Post service unavail
 export const invalidCommentError = Object.freeze({ error: "Invalid comment" });
 export const invalidCommentPageError = Object.freeze({ error: "Invalid comment page" });
 export const commentUnavailableError = Object.freeze({ error: "Comment service unavailable" });
+export const invalidPersonalPageError = Object.freeze({ error: "Invalid page" });
+export const invalidPreferencesError = Object.freeze({ error: "Invalid preferences" });
+export const personalUnavailableError = Object.freeze({ error: "Personal state unavailable" });

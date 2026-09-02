@@ -24,6 +24,7 @@ const profileMigration = migration("002-profile-lifecycle.sql");
 const communityMigration = migration("003-community-roles.sql");
 const postMigration = migration("004-posts.sql");
 const commentMigration = migration("005-comments.sql");
+const personalMigration = migration("006-personal-state.sql");
 
 /** @param {Database} database */
 function assertCommunityOwnerInvariant(database) {
@@ -60,6 +61,24 @@ function assertPostInvariant(database) {
     (type = 'media' AND text_content IS NULL AND url_content IS NULL AND media_filename IS NOT NULL AND media_content_type IN ('image/jpeg', 'image/png', 'image/gif', 'image/webp') AND media_bytes IS NOT NULL)
   ) LIMIT 1`).get();
   if (invalid) throw new Error("post invariant is invalid");
+}
+
+/** @param {Database} database */
+function assertPersonalInvariant(database) {
+  const tables = database.prepare(`SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'table'
+    AND name IN ('saved_posts', 'post_history', 'personal_traversals', 'personal_traversal_items', 'personal_page_tokens', 'user_preferences')`).get().count;
+  const savedForeignKeys = database.prepare("PRAGMA foreign_key_list(saved_posts)").all();
+  const historyForeignKeys = database.prepare("PRAGMA foreign_key_list(post_history)").all();
+  const itemForeignKeys = database.prepare("PRAGMA foreign_key_list(personal_traversal_items)").all();
+  const tokenForeignKeys = database.prepare("PRAGMA foreign_key_list(personal_page_tokens)").all();
+  const indexCount = database.prepare(`SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'index'
+    AND name IN ('saved_posts_owner_order', 'post_history_owner_order', 'personal_traversals_owner_kind')`).get().count;
+  const preferenceSql = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'user_preferences'").get()?.sql || "";
+  /** @param {{table: string, from: string, on_delete: string}[]} foreignKeys @param {string} table @param {string} from */
+  const hasCascade = (foreignKeys, table, from) => foreignKeys.some((key) => key.table === table && key.from === from && key.on_delete === 'CASCADE');
+  if (tables !== 6 || indexCount !== 3 || !hasCascade(savedForeignKeys, 'posts', 'post_id') || !hasCascade(historyForeignKeys, 'posts', 'post_id') ||
+    !hasCascade(itemForeignKeys, 'posts', 'post_id') || !hasCascade(tokenForeignKeys, 'personal_traversals', 'traversal_id') ||
+    !preferenceSql.includes("theme IN ('system', 'light', 'dark')") || !preferenceSql.includes('compact_mode IN (0, 1)')) throw new Error("personal state invariant is invalid");
 }
 
 /** @param {Database} database */
@@ -101,7 +120,7 @@ export function openDatabase(path) {
   try {
     database.exec("PRAGMA foreign_keys = ON; BEGIN IMMEDIATE");
     const version = /** @type {{user_version: number}} */ (database.prepare("PRAGMA user_version").get()).user_version;
-    if (version > 5) throw new Error("Unsupported database schema version");
+    if (version > 6) throw new Error("Unsupported database schema version");
     if (version === 0) {
       database.exec(baselineMigration);
       database.exec("PRAGMA user_version = 1");
@@ -122,9 +141,14 @@ export function openDatabase(path) {
       database.exec(commentMigration);
       database.exec("PRAGMA user_version = 5");
     }
+    if (version <= 5) {
+      database.exec(personalMigration);
+      database.exec("PRAGMA user_version = 6");
+    }
     assertCommunityOwnerInvariant(database);
     assertPostInvariant(database);
     assertCommentInvariant(database);
+    assertPersonalInvariant(database);
     database.exec("COMMIT");
     return database;
   } catch (error) {

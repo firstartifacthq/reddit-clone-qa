@@ -10,6 +10,9 @@ import { PostRepository } from "./post/post-repository.js";
 import { PostService } from "./post/post-service.js";
 import { CommentRepository } from "./comment/comment-repository.js";
 import { CommentService } from "./comment/comment-service.js";
+import { PersonalRepository } from "./personal/personal-repository.js";
+import { PersonalService } from "./personal/personal-service.js";
+import { validatePersonalPage, validatePreferencePatch } from "./personal/personal-validation.js";
 import { validateCommentPage } from "./comment/comment-validation.js";
 import { canonicalCommunityName } from "./community/community-validation.js";
 import { normalizeUsername } from "./account/username.js";
@@ -17,11 +20,12 @@ import {
   authenticationError, forbiddenError, invalidCommunityError, invalidCredentialsError, invalidProfileError,
   invalidRequestError, notFoundError, profileUnavailableError, invalidPostError, postConflictError, postUnavailableError,
   invalidCommentError, invalidCommentPageError, commentUnavailableError,
+  invalidPersonalPageError, invalidPreferencesError, personalUnavailableError,
 } from "./http-errors.js";
 import { renderShell } from "./public-shell.js";
 
 /** @typedef {{exec: (sql: string) => void, prepare: (sql: string) => any, close: () => void}} Database */
-/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string, beforeMediaPersist?: () => void, beforeCommentPersist?: () => void}} AppOptions */
+/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string, beforeMediaPersist?: () => void, beforeCommentPersist?: () => void, beforeSavedPersist?: () => void, beforeHistoryPersist?: () => void, beforePreferencePersist?: () => void}} AppOptions */
 /** @typedef {Record<string, string | string[] | undefined>} RequestHeaders */
 /** @typedef {{method?: string, path?: string, headers?: RequestHeaders, payload?: string | Uint8Array}} AppRequest */
 /** @typedef {{status: number, headers: Record<string, string>, body: string | Uint8Array}} AppResponse */
@@ -71,6 +75,8 @@ function publicUsername(pathname) {
   if (!match) return undefined;
   try { return normalizeUsername(decodeURIComponent(match[1])); } catch { return undefined; }
 }
+/** @param {string} pathname */
+function privateUserSuffix(pathname) { return /^\/api\/users\/[^/]+\/(saved|history)$/.test(pathname); }
 // null means that this is not a community route; undefined means an invalid route name.
 /** @param {string} pathname @param {string} suffix @returns {string | undefined | null} */
 function communityPath(pathname, suffix) {
@@ -109,11 +115,13 @@ export function createApp(options = {}) {
   const communityRepository = new CommunityRepository(database);
   const postRepository = new PostRepository(database);
   const commentRepository = new CommentRepository(database);
+  const personalRepository = new PersonalRepository(database);
   const auth = new AuthService({ repository: authRepository, database, config, now, randomToken });
   const profiles = new ProfileService({ repository: profileRepository, database, now });
   const communities = new CommunityService({ repository: communityRepository, database, now });
   const posts = new PostService({ repository: postRepository, database, beforeMediaPersist: options.beforeMediaPersist });
   const comments = new CommentService({ repository: commentRepository, database, beforeCommentPersist: options.beforeCommentPersist });
+  const personal = new PersonalService({ repository: personalRepository, database, now, beforeSavedPersist: options.beforeSavedPersist, beforeHistoryPersist: options.beforeHistoryPersist, beforePreferencePersist: options.beforePreferencePersist });
   const ownDatabase = !injectedDatabase;
 
   /** @param {string} token @param {number} maxAgeSeconds */
@@ -170,6 +178,48 @@ export function createApp(options = {}) {
         if (result.kind === "success") return json(202, { status: "Deletion requested" }, { "set-cookie": `${sessionCookie("", 0)}; Expires=Thu, 01 Jan 1970 00:00:00 GMT` });
         if (result.kind === "lost-authority") return json(401, authenticationError);
         return json(503, profileUnavailableError);
+      }
+      if (method === "GET" && privateUserSuffix(url.pathname)) return account ? json(403, forbiddenError) : json(401, authenticationError);
+      if (method === "GET" && url.pathname === "/api/me/saved") {
+        if (!account) return json(401, authenticationError);
+        const page = validatePersonalPage(url.searchParams); if (!page) return json(422, invalidPersonalPageError);
+        const result = personal.listing(account.id, "saved", page.limit, page.cursor);
+        if (result.kind === "success") return json(200, { posts: result.items.map((/** @type {any} */ item) => item.post), nextCursor: result.nextCursor });
+        if (result.kind === "lost-authority") return json(401, authenticationError);
+        if (result.kind === "invalid-page") return json(422, invalidPersonalPageError);
+        return json(503, personalUnavailableError);
+      }
+      if (method === "GET" && url.pathname === "/api/me/history") {
+        if (!account) return json(401, authenticationError);
+        const page = validatePersonalPage(url.searchParams); if (!page) return json(422, invalidPersonalPageError);
+        const result = personal.listing(account.id, "history", page.limit, page.cursor);
+        if (result.kind === "success") return json(200, { history: result.items, nextCursor: result.nextCursor });
+        if (result.kind === "lost-authority") return json(401, authenticationError);
+        if (result.kind === "invalid-page") return json(422, invalidPersonalPageError);
+        return json(503, personalUnavailableError);
+      }
+      if (method === "GET" && url.pathname === "/api/me/preferences") {
+        if (!account) return json(401, authenticationError);
+        return json(200, personal.preferences(account.id));
+      }
+      if (method === "PATCH" && url.pathname === "/api/me/preferences") {
+        if (!account) return json(401, authenticationError);
+        const patch = validatePreferencePatch(parseJson(request.payload));
+        if (!patch) return json(422, invalidPreferencesError);
+        const result = personal.updatePreferences(account.id, patch);
+        if (result.kind === "success") return json(200, result.preferences);
+        if (result.kind === "lost-authority") return json(401, authenticationError);
+        return json(503, personalUnavailableError);
+      }
+      const savePost = /^\/api\/posts\/([^/]+)\/save$/.exec(url.pathname);
+      if (savePost && (method === "PUT" || method === "DELETE")) {
+        if (!account) return json(401, authenticationError);
+        let postId; try { postId = decodeURIComponent(savePost[1]); } catch { return json(404, notFoundError); }
+        const result = method === "PUT" ? personal.save(account.id, postId) : personal.unsave(account.id, postId);
+        if (result.kind === "success") return empty(204);
+        if (result.kind === "lost-authority") return json(401, authenticationError);
+        if (result.kind === "not-found") return json(404, notFoundError);
+        return json(503, personalUnavailableError);
       }
       if (method === "PATCH" && isPublicUserRoute) return account ? json(403, forbiddenError) : json(401, authenticationError);
       if (method === "GET" && isPublicUserRoute) {
@@ -292,8 +342,15 @@ export function createApp(options = {}) {
           const media = posts.media(postRoute.id);
           return media ? binary(media.media_content_type, media.media_bytes) : json(404, notFoundError);
         }
-        const post = posts.get(postRoute.id);
-        return post ? json(200, post) : json(404, notFoundError);
+        if (!account) {
+          const post = posts.get(postRoute.id);
+          return post ? json(200, post) : json(404, notFoundError);
+        }
+        const result = personal.readAndRecord(account.id, postRoute.id);
+        if (result.kind === "success") return json(200, result.post);
+        if (result.kind === "lost-authority") return json(401, authenticationError);
+        if (result.kind === "not-found") return json(404, notFoundError);
+        return json(503, personalUnavailableError);
       }
       if (postRoute && method === "PATCH") {
         if (!account) return json(401, authenticationError);
