@@ -150,43 +150,105 @@ function assertPersonalInvariant(database) {
 /** @param {Database} database */
 function assertFeedInvariant(database) {
   const published = database.prepare("PRAGMA table_info(posts)").all().find((/** @type {any} */ column) => column.name === "published_at");
+  const postsSql = normalizedSql(database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'posts'").get()?.sql || "");
   const expectedColumns = {
-    feed_traversals: [["id", "TEXT", 1, 1], ["feed_kind", "TEXT", 1, 0], ["community_name", "TEXT", 0, 0], ["requester_user_id", "TEXT", 0, 0], ["created_at", "INTEGER", 1, 0], ["expires_at", "INTEGER", 1, 0]],
-    feed_traversal_items: [["traversal_id", "TEXT", 1, 1], ["ordinal", "INTEGER", 1, 2], ["post_id", "TEXT", 1, 0]],
-    feed_page_tokens: [["token", "TEXT", 1, 1], ["traversal_id", "TEXT", 1, 0], ["start_ordinal", "INTEGER", 1, 0]],
+    feed_traversals: [["id", "TEXT", 1, null, 1], ["feed_kind", "TEXT", 1, null, 0], ["community_name", "TEXT", 0, null, 0], ["requester_user_id", "TEXT", 0, null, 0], ["created_at", "INTEGER", 1, null, 0], ["expires_at", "INTEGER", 1, null, 0]],
+    feed_traversal_items: [["traversal_id", "TEXT", 1, null, 1], ["ordinal", "INTEGER", 1, null, 2], ["post_id", "TEXT", 1, null, 0]],
+    feed_page_tokens: [["token", "TEXT", 1, null, 1], ["traversal_id", "TEXT", 1, null, 0], ["start_ordinal", "INTEGER", 1, null, 0]],
   };
   /** @param {string} table @param {any[][]} expected */
-  const columnsMatch = (table, expected) => JSON.stringify(database.prepare(`PRAGMA table_info(${table})`).all().map((/** @type {any} */ column) => [column.name, column.type, column.notnull, column.pk])) === JSON.stringify(expected);
-  /** @param {string} table @param {string} name @param {[string, number][]} columns */
-  const hasIndex = (table, name, columns) => {
+  const columnsMatch = (table, expected) => JSON.stringify(database.prepare(`PRAGMA table_info(${table})`).all().map((/** @type {any} */ column) => [column.name, column.type, column.notnull, column.dflt_value, column.pk])) === JSON.stringify(expected);
+  /** @param {string} table @param {string} name @param {number} unique @param {[string, number, string][]} columns */
+  const indexMatches = (table, name, unique, columns) => {
     const index = database.prepare(`PRAGMA index_list(${table})`).all().find((/** @type {any} */ entry) => entry.name === name);
-    return Boolean(index) && JSON.stringify(database.prepare("SELECT name, desc FROM pragma_index_xinfo(?) WHERE key = 1 ORDER BY seqno").all(name).map((/** @type {any} */ part) => [part.name, part.desc])) === JSON.stringify(columns);
+    const actual = index && database.prepare("SELECT name, desc, coll FROM pragma_index_xinfo(?) WHERE key = 1 ORDER BY seqno").all(name).map((/** @type {any} */ part) => [part.name, part.desc, part.coll]);
+    return index?.unique === unique && index?.origin === "c" && JSON.stringify(actual) === JSON.stringify(columns);
   };
+  /** @param {string} table @param {[string, [string, number, string][]][]} expected */
+  const uniqueConstraintsMatch = (table, expected) => {
+    const actual = database.prepare(`PRAGMA index_list(${table})`).all()
+      .filter((/** @type {any} */ index) => index.unique === 1)
+      .map((/** @type {any} */ index) => [index.origin, database.prepare("SELECT name, desc, coll FROM pragma_index_xinfo(?) WHERE key = 1 ORDER BY seqno").all(index.name).map((/** @type {any} */ part) => [part.name, part.desc, part.coll])])
+      .sort((/** @type {any} */ left, /** @type {any} */ right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+    return JSON.stringify(actual) === JSON.stringify([...expected].sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))));
+  };
+  /** @param {string} table @param {string[][]} expected */
+  const foreignKeysMatch = (table, expected) => {
+    const actual = database.prepare(`PRAGMA foreign_key_list(${table})`).all().map((/** @type {any} */ key) => [key.from, key.table, key.to, key.on_update, key.on_delete, key.match]).sort();
+    return JSON.stringify(actual) === JSON.stringify([...expected].sort());
+  };
+
+  const expectedTableSql = {
+    feed_traversals: `CREATE TABLE feed_traversals (
+      id TEXT PRIMARY KEY NOT NULL,
+      feed_kind TEXT NOT NULL CHECK (feed_kind IN ('home', 'popular', 'community')),
+      community_name TEXT,
+      requester_user_id TEXT,
+      created_at INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at >= 0),
+      expires_at INTEGER NOT NULL CHECK (typeof(expires_at) = 'integer' AND expires_at > created_at),
+      CHECK (
+        (feed_kind = 'home' AND requester_user_id IS NOT NULL AND community_name IS NULL) OR
+        (feed_kind = 'popular' AND community_name IS NULL) OR
+        (feed_kind = 'community' AND community_name IS NOT NULL)
+      )
+    )`,
+    feed_traversal_items: `CREATE TABLE feed_traversal_items (
+      traversal_id TEXT NOT NULL REFERENCES feed_traversals(id) ON DELETE CASCADE,
+      ordinal INTEGER NOT NULL CHECK (typeof(ordinal) = 'integer' AND ordinal >= 0),
+      post_id TEXT NOT NULL,
+      PRIMARY KEY (traversal_id, ordinal),
+      UNIQUE (traversal_id, post_id)
+    )`,
+    feed_page_tokens: `CREATE TABLE feed_page_tokens (
+      token TEXT PRIMARY KEY NOT NULL,
+      traversal_id TEXT NOT NULL REFERENCES feed_traversals(id) ON DELETE CASCADE,
+      start_ordinal INTEGER NOT NULL CHECK (typeof(start_ordinal) = 'integer' AND start_ordinal >= 0),
+      UNIQUE (traversal_id, start_ordinal)
+    )`,
+  };
+  const tablesMatch = Object.entries(expectedTableSql).every(([name, expected]) => normalizedSql(database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?").get(name)?.sql || "") === normalizedSql(expected));
+  const requiredChecks = {
+    feed_traversals: [
+      "check (feed_kind in ('home', 'popular', 'community'))",
+      "check ( (feed_kind = 'home' and requester_user_id is not null and community_name is null) or (feed_kind = 'popular' and community_name is null) or (feed_kind = 'community' and community_name is not null) )",
+      "check (typeof(created_at) = 'integer' and created_at >= 0)",
+      "check (typeof(expires_at) = 'integer' and expires_at > created_at)",
+    ],
+    feed_traversal_items: ["check (typeof(ordinal) = 'integer' and ordinal >= 0)"],
+    feed_page_tokens: ["check (typeof(start_ordinal) = 'integer' and start_ordinal >= 0)"],
+  };
+  const checksMatch = Object.entries(requiredChecks).every(([table, checks]) => {
+    const sql = normalizedSql(database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?").get(table)?.sql || "");
+    return checks.every((check) => sql.includes(check));
+  });
   const expectedTriggers = {
     posts_published_at_is_immutable: "create trigger posts_published_at_is_immutable before update of published_at on posts begin select raise(abort, 'post publication time is immutable'); end",
     feed_traversals_are_immutable: "create trigger feed_traversals_are_immutable before update on feed_traversals begin select raise(abort, 'feed traversal is immutable'); end",
     feed_traversal_items_are_immutable: "create trigger feed_traversal_items_are_immutable before update on feed_traversal_items begin select raise(abort, 'feed traversal item is immutable'); end",
     feed_page_tokens_are_immutable: "create trigger feed_page_tokens_are_immutable before update on feed_page_tokens begin select raise(abort, 'feed page token is immutable'); end",
   };
-  const immutable = Object.entries(expectedTriggers).every(([name, expected]) => normalizedSql(database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = ?").get(name)?.sql || "") === normalizedSql(expected));
-  const feedSql = normalizedSql(database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'feed_traversals'").get()?.sql || "");
-  const itemForeignKeys = database.prepare("PRAGMA foreign_key_list(feed_traversal_items)").all();
-  const tokenForeignKeys = database.prepare("PRAGMA foreign_key_list(feed_page_tokens)").all();
-  /** @param {string} table @param {string[]} columns */
-  const hasUnique = (table, columns) => database.prepare(`PRAGMA index_list(${table})`).all().some((/** @type {any} */ index) => index.unique === 1 && JSON.stringify(database.prepare("SELECT name FROM pragma_index_info(?) ORDER BY seqno").all(index.name).map((/** @type {any} */ part) => part.name)) === JSON.stringify(columns));
+  const triggersMatch = Object.entries(expectedTriggers).every(([name, expected]) => normalizedSql(database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = ?").get(name)?.sql || "") === normalizedSql(expected));
   const invalid = database.prepare(`SELECT 1 FROM posts WHERE typeof(published_at) <> 'integer' OR published_at < 0
-    UNION ALL SELECT 1 FROM feed_traversals WHERE feed_kind NOT IN ('home', 'popular', 'community') OR typeof(created_at) <> 'integer' OR created_at < 0 OR typeof(expires_at) <> 'integer' OR expires_at <= created_at
+    UNION ALL SELECT 1 FROM feed_traversals WHERE feed_kind NOT IN ('home', 'popular', 'community')
+      OR NOT ((feed_kind = 'home' AND requester_user_id IS NOT NULL AND community_name IS NULL)
+        OR (feed_kind = 'popular' AND community_name IS NULL)
+        OR (feed_kind = 'community' AND community_name IS NOT NULL))
+      OR typeof(created_at) <> 'integer' OR created_at < 0 OR typeof(expires_at) <> 'integer' OR expires_at <= created_at
     UNION ALL SELECT 1 FROM feed_traversal_items WHERE typeof(ordinal) <> 'integer' OR ordinal < 0
     UNION ALL SELECT 1 FROM feed_page_tokens WHERE typeof(start_ordinal) <> 'integer' OR start_ordinal < 0 LIMIT 1`).get();
-  if (published?.type !== "INTEGER" || published.notnull !== 1 || !Object.entries(expectedColumns).every(([table, columns]) => columnsMatch(table, columns)) ||
-    !hasIndex("posts", "posts_feed_publication", [["published_at", 1], ["id", 0]]) ||
-    !hasIndex("posts", "posts_feed_community_publication", [["community_name", 0], ["published_at", 1], ["id", 0]]) ||
-    !hasIndex("community_memberships", "community_memberships_feed_user", [["user_id", 0], ["community_name", 0]]) ||
-    !feedSql.includes("check (feed_kind in ('home', 'popular', 'community'))") || !feedSql.includes("feed_kind = 'home' and requester_user_id is not null and community_name is null") ||
-    !hasUnique("feed_traversal_items", ["traversal_id", "post_id"]) || !hasUnique("feed_page_tokens", ["traversal_id", "start_ordinal"]) ||
-    itemForeignKeys.length !== 1 || itemForeignKeys[0].table !== "feed_traversals" || itemForeignKeys[0].from !== "traversal_id" || itemForeignKeys[0].on_delete !== "CASCADE" ||
-    tokenForeignKeys.length !== 1 || tokenForeignKeys[0].table !== "feed_traversals" || tokenForeignKeys[0].from !== "traversal_id" || tokenForeignKeys[0].on_delete !== "CASCADE" ||
-    !immutable || invalid || database.prepare("PRAGMA foreign_key_check").get()) throw new Error("feed invariant is invalid");
+  const binary = "BINARY";
+  if (published?.type !== "INTEGER" || published.notnull !== 1 || published.dflt_value !== "0" || !postsSql.includes("check (typeof(published_at) = 'integer' and published_at >= 0)") ||
+    !Object.entries(expectedColumns).every(([table, columns]) => columnsMatch(table, columns)) || !tablesMatch || !checksMatch ||
+    !foreignKeysMatch("feed_traversal_items", [["traversal_id", "feed_traversals", "id", "NO ACTION", "CASCADE", "NONE"]]) ||
+    !foreignKeysMatch("feed_page_tokens", [["traversal_id", "feed_traversals", "id", "NO ACTION", "CASCADE", "NONE"]]) ||
+    !uniqueConstraintsMatch("feed_traversals", [["pk", [["id", 0, binary]]]]) ||
+    !uniqueConstraintsMatch("feed_traversal_items", [["pk", [["traversal_id", 0, binary], ["ordinal", 0, binary]]], ["u", [["traversal_id", 0, binary], ["post_id", 0, binary]]]]) ||
+    !uniqueConstraintsMatch("feed_page_tokens", [["pk", [["token", 0, binary]]], ["u", [["traversal_id", 0, binary], ["start_ordinal", 0, binary]]]]) ||
+    !indexMatches("posts", "posts_feed_publication", 0, [["published_at", 1, binary], ["id", 0, binary]]) ||
+    !indexMatches("posts", "posts_feed_community_publication", 0, [["community_name", 0, binary], ["published_at", 1, binary], ["id", 0, binary]]) ||
+    !indexMatches("community_memberships", "community_memberships_feed_user", 0, [["user_id", 0, binary], ["community_name", 0, binary]]) ||
+    !indexMatches("feed_traversals", "feed_traversals_expiry", 0, [["expires_at", 0, binary]]) ||
+    !triggersMatch || invalid || database.prepare("PRAGMA foreign_key_check").get()) throw new Error("feed invariant is invalid");
 }
 
 /** @param {Database} database */
