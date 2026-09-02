@@ -24,6 +24,7 @@ const profileMigration = migration("002-profile-lifecycle.sql");
 const communityMigration = migration("003-community-roles.sql");
 const postMigration = migration("004-posts.sql");
 const commentMigration = migration("005-comments.sql");
+const voteMigration = migration("006-votes.sql");
 
 /** @param {Database} database */
 function assertCommunityOwnerInvariant(database) {
@@ -60,6 +61,24 @@ function assertPostInvariant(database) {
     (type = 'media' AND text_content IS NULL AND url_content IS NULL AND media_filename IS NOT NULL AND media_content_type IN ('image/jpeg', 'image/png', 'image/gif', 'image/webp') AND media_bytes IS NOT NULL)
   ) LIMIT 1`).get();
   if (invalid) throw new Error("post invariant is invalid");
+}
+
+/** @param {Database} database */
+function assertVoteInvariant(database) {
+  const voteColumns = /** @type {{name: string, type: string, notnull: number, pk: number}[]} */ (database.prepare("PRAGMA table_info(post_votes)").all());
+  const expectedColumns = [
+    ["post_id", "TEXT", 1], ["voter_user_id", "TEXT", 2], ["value", "INTEGER", 0],
+  ];
+  const columnsValid = expectedColumns.every(([name, type, pk]) => voteColumns.some((column) =>
+    column.name === name && column.type === type && column.notnull === 1 && column.pk === pk));
+  const foreignKeys = /** @type {{table: string, from: string, to: string, on_delete: string}[]} */ (database.prepare("PRAGMA foreign_key_list(post_votes)").all());
+  const cascade = foreignKeys.some((foreignKey) => foreignKey.table === "posts" && foreignKey.from === "post_id" && foreignKey.to === "id" && foreignKey.on_delete === "CASCADE");
+  const voter = foreignKeys.some((foreignKey) => foreignKey.table === "users" && foreignKey.from === "voter_user_id" && foreignKey.to === "id");
+  const postState = /** @type {{name: string}[]} */ (database.prepare("PRAGMA table_info(posts)").all()).some((column) => column.name === "voting_state");
+  const schema = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'post_votes'").get();
+  const checked = typeof schema?.sql === "string" && /CHECK\s*\(\s*value\s+IN\s*\(\s*-1\s*,\s*1\s*\)\s*\)/i.test(schema.sql);
+  const invalid = database.prepare("SELECT 1 FROM post_votes WHERE value NOT IN (-1, 1) LIMIT 1").get();
+  if (!columnsValid || !cascade || !voter || !postState || !checked || invalid) throw new Error("vote invariant is invalid");
 }
 
 /** @param {Database} database */
@@ -101,7 +120,7 @@ export function openDatabase(path) {
   try {
     database.exec("PRAGMA foreign_keys = ON; BEGIN IMMEDIATE");
     const version = /** @type {{user_version: number}} */ (database.prepare("PRAGMA user_version").get()).user_version;
-    if (version > 5) throw new Error("Unsupported database schema version");
+    if (version > 6) throw new Error("Unsupported database schema version");
     if (version === 0) {
       database.exec(baselineMigration);
       database.exec("PRAGMA user_version = 1");
@@ -122,9 +141,14 @@ export function openDatabase(path) {
       database.exec(commentMigration);
       database.exec("PRAGMA user_version = 5");
     }
+    if (version <= 5) {
+      database.exec(voteMigration);
+      database.exec("PRAGMA user_version = 6");
+    }
     assertCommunityOwnerInvariant(database);
     assertPostInvariant(database);
     assertCommentInvariant(database);
+    assertVoteInvariant(database);
     database.exec("COMMIT");
     return database;
   } catch (error) {
