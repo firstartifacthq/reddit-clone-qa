@@ -25,6 +25,7 @@ Optional non-secret configuration is captured when the application starts:
 - `GET`, `PATCH`, and `DELETE /api/me`
 - `GET /api/users/:username`
 - `GET /api/communities`
+- `GET /api/search?q=:query[&type=community|post|comment]`
 - `POST /api/communities`
 - `POST /api/communities/:canonicalName/members`
 - `DELETE /api/communities/:canonicalName/members/me`
@@ -48,5 +49,7 @@ Authenticated active users can create a community with a 3 through 21 character 
 Current members can publish JSON text, HTTP(S) link, or image media posts. Media uploads use canonical base64 in the JSON request and are stored with their metadata in the local SQLite database; media reads return the accepted bytes with their declared image content type. Post creation accepts an optional `Idempotency-Key` for safe retries. Only the author can edit declared-form fields or delete a post.
 
 Active community members can add JSON comments to a readable post, either top-level or with a same-post `parentId`. Conversations are depth-first pre-order pages; `limit` defaults to 25 and accepts 1 through 100. Returned cursors are opaque, resumable snapshots, so later comments do not enter an existing traversal. Comment authors may edit active comments or replace them with privacy-preserving tombstones while descendants retain their original nesting.
+
+`GET /api/search` requires exactly one `q` query parameter containing 1 through 200 non-control Unicode code points after trimming Unicode whitespace. Its optional `type` is exactly `community`, `post`, or `comment`; omitted searches all three. A valid search with no readable literal substring matches returns `{ "results": [] }`. Successful results contain only a typed stable identity (`{ "type": "community", "canonicalName" }`, `{ "type": "post", "id" }`, or `{ "type": "comment", "id" }`). Invalid searches return `400 { "error": "Invalid search" }`; unavailable retrieval returns `503 { "error": "Search service unavailable" }`.
 
 Run `npm run typecheck`, `npm test`, and `npm run build` before submitting changes.
