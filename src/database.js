@@ -25,6 +25,7 @@ const communityMigration = migration("003-community-roles.sql");
 const postMigration = migration("004-posts.sql");
 const commentMigration = migration("005-comments.sql");
 const voteMigration = migration("006-votes.sql");
+const feedMigration = migration("007-feeds.sql");
 
 /** @param {Database} database */
 function assertCommunityOwnerInvariant(database) {
@@ -93,6 +94,51 @@ function assertVoteInvariant(database) {
 }
 
 /** @param {Database} database */
+function assertFeedInvariant(database) {
+  const postOrderColumns = /** @type {{name: string, type: string, notnull: number, pk: number}[]} */ (database.prepare("PRAGMA table_info(post_creation_order)").all());
+  const orderColumnValid = postOrderColumns.some((column) => column.name === "post_id" && column.type === "TEXT" && column.notnull === 1 && column.pk === 1)
+    && postOrderColumns.some((column) => column.name === "sequence" && column.type === "INTEGER" && column.notnull === 1);
+  const trigger = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = 'posts_assign_creation_order'").get();
+  const orderSchema = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'post_creation_order'").get();
+  const traversalSchema = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'feed_traversals'").get();
+  const itemSchema = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'feed_traversal_items'").get();
+  const tokenSchema = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'feed_page_tokens'").get();
+  const tables = [orderSchema, traversalSchema, itemSchema, tokenSchema].every((table) => typeof table?.sql === "string");
+  const schemaValid = typeof orderSchema?.sql === "string" && /post_id\s+TEXT\s+PRIMARY\s+KEY\s+NOT\s+NULL\s+REFERENCES\s+posts\s*\(\s*id\s*\)\s+ON\s+DELETE\s+CASCADE/i.test(orderSchema.sql)
+    && /sequence\s+INTEGER\s+NOT\s+NULL\s+UNIQUE\s+CHECK\s*\(\s*sequence\s*>\s*0\s*\)/i.test(orderSchema.sql)
+    && typeof traversalSchema?.sql === "string" && /kind\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*kind\s+IN/i.test(traversalSchema.sql)
+    && /expires_at\s*>\s*created_at/i.test(traversalSchema.sql)
+    && /kind\s*=\s*'community'\s+AND\s+community_name\s+IS\s+NOT\s+NULL/i.test(traversalSchema.sql)
+    && typeof itemSchema?.sql === "string" && /PRIMARY\s+KEY\s*\(\s*traversal_id\s*,\s*ordinal\s*\)/i.test(itemSchema.sql)
+    && /UNIQUE\s*\(\s*traversal_id\s*,\s*post_id\s*\)/i.test(itemSchema.sql)
+    && !/post_id\s+TEXT[^,]*REFERENCES\s+posts/i.test(itemSchema.sql)
+    && typeof tokenSchema?.sql === "string" && /token\s+TEXT\s+PRIMARY\s+KEY\s+NOT\s+NULL/i.test(tokenSchema.sql)
+    && /UNIQUE\s*\(\s*traversal_id\s*,\s*start_ordinal\s*\)/i.test(tokenSchema.sql);
+  const invalid = database.prepare(`SELECT 1 FROM posts AS post
+    LEFT JOIN post_creation_order AS ordered ON ordered.post_id = post.id
+    WHERE ordered.post_id IS NULL
+    UNION ALL
+    SELECT 1 FROM post_creation_order WHERE sequence <= 0
+    UNION ALL
+    SELECT 1 FROM feed_traversals
+    WHERE (kind = 'community' AND community_name IS NULL) OR (kind IN ('home', 'popular') AND community_name IS NOT NULL) OR expires_at <= created_at
+    UNION ALL
+    SELECT 1 FROM feed_traversal_items AS item
+    LEFT JOIN feed_traversals AS traversal ON traversal.id = item.traversal_id
+    WHERE traversal.id IS NULL OR item.ordinal < 0
+    UNION ALL
+    SELECT 1 FROM feed_page_tokens AS token
+    LEFT JOIN feed_traversals AS traversal ON traversal.id = token.traversal_id
+    WHERE traversal.id IS NULL OR token.start_ordinal < 0
+    LIMIT 1`).get();
+  const duplicateOrder = database.prepare("SELECT 1 FROM post_creation_order GROUP BY sequence HAVING COUNT(*) <> 1 LIMIT 1").get();
+  const duplicateItems = database.prepare("SELECT 1 FROM feed_traversal_items GROUP BY traversal_id, post_id HAVING COUNT(*) <> 1 LIMIT 1").get();
+  if (!orderColumnValid || !tables || !schemaValid || !trigger || typeof trigger.sql !== "string"
+      || !/AFTER\s+INSERT\s+ON\s+posts/i.test(trigger.sql) || !/INSERT\s+INTO\s+post_creation_order/i.test(trigger.sql)
+      || invalid || duplicateOrder || duplicateItems) throw new Error("feed invariant is invalid");
+}
+
+/** @param {Database} database */
 function assertCommentInvariant(database) {
   const triggerCount = database.prepare(`SELECT COUNT(*) AS count FROM sqlite_schema
     WHERE type = 'trigger' AND name IN (
@@ -131,7 +177,7 @@ export function openDatabase(path) {
   try {
     database.exec("PRAGMA foreign_keys = ON; BEGIN IMMEDIATE");
     const version = /** @type {{user_version: number}} */ (database.prepare("PRAGMA user_version").get()).user_version;
-    if (version > 6) throw new Error("Unsupported database schema version");
+    if (version > 7) throw new Error("Unsupported database schema version");
     if (version === 0) {
       database.exec(baselineMigration);
       database.exec("PRAGMA user_version = 1");
@@ -156,10 +202,15 @@ export function openDatabase(path) {
       database.exec(voteMigration);
       database.exec("PRAGMA user_version = 6");
     }
+    if (version <= 6) {
+      database.exec(feedMigration);
+      database.exec("PRAGMA user_version = 7");
+    }
     assertCommunityOwnerInvariant(database);
     assertPostInvariant(database);
     assertCommentInvariant(database);
     assertVoteInvariant(database);
+    assertFeedInvariant(database);
     database.exec("COMMIT");
     return database;
   } catch (error) {

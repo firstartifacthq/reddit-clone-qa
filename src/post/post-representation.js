@@ -5,3 +5,9 @@ export function postRepresentation(post) {
   if (post.type === "link") return { ...common, url: post.url_content };
   return { ...common, media: { filename: post.media_filename, contentType: post.media_content_type, byteLength: post.media_bytes?.length ?? 0 } };
 }
+
+/** @param {Parameters<typeof postRepresentation>[0] & {score: number}} post */
+export function feedPostRepresentation(post) {
+  if (!Number.isSafeInteger(post.score)) throw new TypeError("feed score must be an integer");
+  return { ...postRepresentation(post), score: post.score };
+}

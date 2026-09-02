@@ -12,19 +12,23 @@ import { CommentRepository } from "./comment/comment-repository.js";
 import { CommentService } from "./comment/comment-service.js";
 import { VoteRepository } from "./vote/vote-repository.js";
 import { VoteService } from "./vote/vote-service.js";
+import { FeedRepository } from "./feed/feed-repository.js";
+import { FeedService } from "./feed/feed-service.js";
 import { parseVoteJson, validateVote } from "./vote/vote-validation.js";
 import { validateCommentPage } from "./comment/comment-validation.js";
+import { validateFeedPage } from "./feed/feed-validation.js";
 import { canonicalCommunityName } from "./community/community-validation.js";
 import { normalizeUsername } from "./account/username.js";
 import {
   authenticationError, forbiddenError, invalidCommunityError, invalidCredentialsError, invalidProfileError,
   invalidRequestError, notFoundError, profileUnavailableError, invalidPostError, postConflictError, postUnavailableError,
   invalidCommentError, invalidCommentPageError, commentUnavailableError, invalidVoteError, voteUnavailableError,
+  invalidFeedPageError, feedUnavailableError,
 } from "./http-errors.js";
 import { renderShell } from "./public-shell.js";
 
 /** @typedef {{exec: (sql: string) => void, prepare: (sql: string) => any, close: () => void}} Database */
-/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string, beforeMediaPersist?: () => void, beforeCommentPersist?: () => void, beforeVotePersist?: () => void}} AppOptions */
+/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, feedTraversalLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string, beforeMediaPersist?: () => void, beforeCommentPersist?: () => void, beforeVotePersist?: () => void, beforeFeedSnapshotPersist?: () => void, beforeFeedRead?: () => void}} AppOptions */
 /** @typedef {Record<string, string | string[] | undefined>} RequestHeaders */
 /** @typedef {{method?: string, path?: string, headers?: RequestHeaders, payload?: string | Uint8Array}} AppRequest */
 /** @typedef {{status: number, headers: Record<string, string>, body: string | Uint8Array}} AppResponse */
@@ -110,7 +114,10 @@ function isJsonContentType(contentType) { return typeof contentType === "string"
 
 /** @param {AppOptions} [options] */
 export function createApp(options = {}) {
-  const { database: injectedDatabase, now, randomToken, beforeMediaPersist, beforeCommentPersist, beforeVotePersist, ...configOptions } = options;
+  const {
+    database: injectedDatabase, now, randomToken, beforeMediaPersist, beforeCommentPersist, beforeVotePersist,
+    beforeFeedSnapshotPersist, beforeFeedRead, ...configOptions
+  } = options;
   const config = createConfig(configOptions);
   const database = injectedDatabase || openDatabase(config.databasePath);
   const authRepository = new AuthRepository(database);
@@ -119,12 +126,17 @@ export function createApp(options = {}) {
   const postRepository = new PostRepository(database);
   const commentRepository = new CommentRepository(database);
   const voteRepository = new VoteRepository(database);
+  const feedRepository = new FeedRepository(database);
   const auth = new AuthService({ repository: authRepository, database, config, now, randomToken });
   const profiles = new ProfileService({ repository: profileRepository, database, now });
   const communities = new CommunityService({ repository: communityRepository, database, now });
   const posts = new PostService({ repository: postRepository, database, beforeMediaPersist });
   const comments = new CommentService({ repository: commentRepository, database, beforeCommentPersist });
   const votes = new VoteService({ repository: voteRepository, database, beforeVotePersist });
+  const feeds = new FeedService({
+    repository: feedRepository, database, now, feedTraversalLifetimeMs: config.feedTraversalLifetimeMs,
+    beforeFeedSnapshotPersist, beforeFeedRead,
+  });
   const ownDatabase = !injectedDatabase;
 
   /** @param {string} token @param {number} maxAgeSeconds */
@@ -187,6 +199,35 @@ export function createApp(options = {}) {
         if (!username) return json(404, notFoundError);
         const profile = profiles.getPublic(username);
         return profile ? json(200, profile) : json(404, notFoundError);
+      }
+      if (method === "GET" && url.pathname === "/api/feed/home") {
+        // Home never admits pagination input without an active account.
+        if (!account) return json(401, authenticationError);
+        const page = validateFeedPage(url.searchParams);
+        if (!page) return json(400, invalidFeedPageError);
+        const result = feeds.read("home", null, account.id, page.limit, page.cursor);
+        if (result.kind === "success") return json(200, { posts: result.posts, nextCursor: result.nextCursor });
+        if (result.kind === "invalid-page") return json(400, invalidFeedPageError);
+        return json(503, feedUnavailableError);
+      }
+      if (method === "GET" && url.pathname === "/api/feed/popular") {
+        const page = validateFeedPage(url.searchParams);
+        if (!page) return json(400, invalidFeedPageError);
+        const result = feeds.read("popular", null, account?.id || "anonymous", page.limit, page.cursor);
+        if (result.kind === "success") return json(200, { posts: result.posts, nextCursor: result.nextCursor });
+        if (result.kind === "invalid-page") return json(400, invalidFeedPageError);
+        return json(503, feedUnavailableError);
+      }
+      const feedCommunity = communityPath(url.pathname, "/feed");
+      if (method === "GET" && feedCommunity !== null) {
+        if (!feedCommunity || !feedRepository.hasCommunity(feedCommunity)) return json(404, notFoundError);
+        const page = validateFeedPage(url.searchParams);
+        if (!page) return json(400, invalidFeedPageError);
+        const result = feeds.read("community", feedCommunity, account?.id || "anonymous", page.limit, page.cursor);
+        if (result.kind === "success") return json(200, { posts: result.posts, nextCursor: result.nextCursor });
+        if (result.kind === "not-found") return json(404, notFoundError);
+        if (result.kind === "invalid-page") return json(400, invalidFeedPageError);
+        return json(503, feedUnavailableError);
       }
       if (method === "POST" && url.pathname === "/api/communities") {
         if (!account) return json(401, authenticationError);

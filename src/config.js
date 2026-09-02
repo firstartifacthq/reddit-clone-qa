@@ -3,6 +3,7 @@
  * @property {string} databasePath
  * @property {number} port
  * @property {number} sessionLifetimeMs
+ * @property {number} feedTraversalLifetimeMs
  * @property {string} cookieName
  * @property {boolean} secureCookies
  */
@@ -16,6 +17,7 @@ const defaults = Object.freeze({
   databasePath: environment.DATABASE_PATH || "./reddit.sqlite",
   port: Number(environment.PORT || 3000),
   sessionLifetimeMs: Number(environment.SESSION_LIFETIME_MS || 3_600_000),
+  feedTraversalLifetimeMs: Number(environment.FEED_TRAVERSAL_LIFETIME_MS || 86_400_000),
   cookieName: environment.SESSION_COOKIE_NAME || "reddit_session",
   secureCookies: environment.NODE_ENV === "production",
 });
@@ -34,6 +36,9 @@ export function createConfig(overrides = {}) {
   }
   if (!Number.isSafeInteger(config.sessionLifetimeMs) || config.sessionLifetimeMs < 1_000) {
     throw new TypeError("sessionLifetimeMs must be an integer of at least 1000");
+  }
+  if (!Number.isSafeInteger(config.feedTraversalLifetimeMs) || config.feedTraversalLifetimeMs < 1_000) {
+    throw new TypeError("feedTraversalLifetimeMs must be an integer of at least 1000");
   }
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(config.cookieName)) {
     throw new TypeError("cookieName must be a cookie-safe name");
