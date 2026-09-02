@@ -17,3 +17,5 @@ export const invalidPreferencesError = Object.freeze({ error: "Invalid preferenc
 export const personalUnavailableError = Object.freeze({ error: "Personal state unavailable" });
 export const invalidVoteError = Object.freeze({ error: "Invalid vote" });
 export const voteUnavailableError = Object.freeze({ error: "Vote service unavailable" });
+export const invalidSearchError = Object.freeze({ error: "Invalid search" });
+export const searchUnavailableError = Object.freeze({ error: "Search unavailable" });
