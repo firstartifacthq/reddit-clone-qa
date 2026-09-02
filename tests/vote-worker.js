@@ -9,13 +9,14 @@ const waitResult = Atomics.wait(control, 0, 0, 5_000);
 parentPort.postMessage({ type: "attempting", waitResult });
 
 try {
+  const isPut = workerData.method === "PUT";
   const response = await app.inject({
     path: workerData.route,
-    method: "PUT",
-    headers: { "content-type": "application/json", cookie: workerData.cookie },
-    payload: JSON.stringify({ value: workerData.value }),
+    method: workerData.method,
+    headers: { ...(isPut ? { "content-type": "application/json" } : {}), cookie: workerData.cookie },
+    ...(isPut ? { payload: JSON.stringify({ value: workerData.value }) } : {}),
   });
-  parentPort.postMessage({ type: "result", statusCode: response.statusCode, body: await response.json() });
+  parentPort.postMessage({ type: "result", statusCode: response.statusCode, body: await response.text() });
 } catch (error) {
   parentPort.postMessage({ type: "result", error: error instanceof Error ? error.message : String(error) });
 } finally {

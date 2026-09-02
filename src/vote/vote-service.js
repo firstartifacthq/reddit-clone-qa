@@ -15,7 +15,7 @@ export class VoteService {
   authorize(userId, postId, mutation) {
     const target = this.repository.findTarget(postId);
     if (!target) return "not-found";
-    if (mutation && (target.author_user_id === userId || target.voting_state === "locked")) return "forbidden";
+    if (mutation && (target.author_user_id === userId || target.voting_state !== "unlocked")) return "forbidden";
     return "allowed";
   }
 

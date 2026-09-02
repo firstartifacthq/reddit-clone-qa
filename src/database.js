@@ -74,11 +74,22 @@ function assertVoteInvariant(database) {
   const foreignKeys = /** @type {{table: string, from: string, to: string, on_delete: string}[]} */ (database.prepare("PRAGMA foreign_key_list(post_votes)").all());
   const cascade = foreignKeys.some((foreignKey) => foreignKey.table === "posts" && foreignKey.from === "post_id" && foreignKey.to === "id" && foreignKey.on_delete === "CASCADE");
   const voter = foreignKeys.some((foreignKey) => foreignKey.table === "users" && foreignKey.from === "voter_user_id" && foreignKey.to === "id");
-  const postState = /** @type {{name: string}[]} */ (database.prepare("PRAGMA table_info(posts)").all()).some((column) => column.name === "voting_state");
-  const schema = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'post_votes'").get();
-  const checked = typeof schema?.sql === "string" && /CHECK\s*\(\s*value\s+IN\s*\(\s*-1\s*,\s*1\s*\)\s*\)/i.test(schema.sql);
-  const invalid = database.prepare("SELECT 1 FROM post_votes WHERE value NOT IN (-1, 1) LIMIT 1").get();
-  if (!columnsValid || !cascade || !voter || !postState || !checked || invalid) throw new Error("vote invariant is invalid");
+  const postColumns = /** @type {{name: string, type: string, notnull: number, dflt_value: string | null}[]} */ (database.prepare("PRAGMA table_info(posts)").all());
+  const postState = postColumns.find((column) => column.name === "voting_state");
+  const postStateColumnValid = postState?.type === "TEXT"
+    && postState.notnull === 1
+    && postState.dflt_value === "'unlocked'";
+  const voteSchema = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'post_votes'").get();
+  const voteChecked = typeof voteSchema?.sql === "string" && /CHECK\s*\(\s*value\s+IN\s*\(\s*-1\s*,\s*1\s*\)\s*\)/i.test(voteSchema.sql);
+  const postSchema = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'posts'").get();
+  const postStateChecked = typeof postSchema?.sql === "string"
+    && /CHECK\s*\(\s*voting_state\s+IN\s*\(\s*'unlocked'\s*,\s*'locked'\s*\)\s*\)/i.test(postSchema.sql);
+  const invalidVote = database.prepare("SELECT 1 FROM post_votes WHERE value NOT IN (-1, 1) LIMIT 1").get();
+  const invalidPostState = database.prepare("SELECT 1 FROM posts WHERE voting_state IS NULL OR voting_state NOT IN ('unlocked', 'locked') LIMIT 1").get();
+  if (!columnsValid || !cascade || !voter || !postStateColumnValid || !voteChecked
+      || !postStateChecked || invalidVote || invalidPostState) {
+    throw new Error("vote invariant is invalid");
+  }
 }
 
 /** @param {Database} database */

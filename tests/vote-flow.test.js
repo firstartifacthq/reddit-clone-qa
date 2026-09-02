@@ -67,6 +67,35 @@ async function waitForWorkers(runs, type) {
   }
   throw new Error(`vote workers did not reach ${type}`);
 }
+
+async function runConcurrentMutations(app, path, cookie, route, operations) {
+  const barrier = new SharedArrayBuffer(8);
+  const control = new Int32Array(barrier);
+  const workerPath = new URL("./vote-worker.js", import.meta.url);
+  const runs = operations.map((operation) => startVoteWorker(workerPath, {
+    path, cookie, route, barrier, ...operation,
+  }));
+  let lockHeld = false;
+  try {
+    await waitForWorkers(runs, "ready");
+    assert.equal(Atomics.load(control, 1), operations.length);
+    app.database.exec("BEGIN IMMEDIATE");
+    lockHeld = true;
+    Atomics.store(control, 0, 1);
+    assert.equal(Atomics.notify(control, 0, operations.length), operations.length);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    app.database.exec("COMMIT");
+    lockHeld = false;
+    const messages = await Promise.all(runs.map((run) => run.complete));
+    return messages.map((workerMessages) => workerMessages.find((message) => message.type === "result"));
+  } finally {
+    if (lockHeld) app.database.exec("ROLLBACK");
+    Atomics.store(control, 0, 1);
+    Atomics.notify(control, 0, operations.length);
+    await Promise.allSettled(runs.map((run) => run.worker.terminate()));
+  }
+}
+
 function voteRows(app) { return app.database.prepare("SELECT post_id, voter_user_id, value FROM post_votes ORDER BY post_id, voter_user_id").all().map((row) => ({ ...row })); }
 function sums(app, postId) {
   return { ...app.database.prepare(`SELECT
@@ -110,13 +139,32 @@ test("SCN-RC-06-H2 derives negative score and author karma and cascades deleted-
     const { owner, post } = await postOwner(request);
     const secondResponse = await jsonRequest(request, "/api/communities/voting/posts", "POST", { type: "text", title: "Second", text: "body" }, owner.cookie);
     const second = await secondResponse.json();
+    const otherOwner = await signup(request, "other-vote-owner");
+    assert.equal((await jsonRequest(request, "/api/communities", "POST", { name: "other_voting" }, otherOwner.cookie)).statusCode, 201);
+    const otherFirst = await (await jsonRequest(request, "/api/communities/other_voting/posts", "POST", { type: "text", title: "Other first", text: "body" }, otherOwner.cookie)).json();
+    const otherSecond = await (await jsonRequest(request, "/api/communities/other_voting/posts", "POST", { type: "text", title: "Other second", text: "body" }, otherOwner.cookie)).json();
     const up = await signup(request, "vote-up");
     const down = await signup(request, "vote-down");
     assert.equal((await jsonRequest(request, votePath(post), "PUT", { value: -1 }, up.cookie)).statusCode, 200);
     assert.equal((await jsonRequest(request, votePath(second), "PUT", { value: 1 }, down.cookie)).statusCode, 200);
+    assert.equal((await jsonRequest(request, votePath(otherFirst), "PUT", { value: 1 }, up.cookie)).statusCode, 200);
+    assert.equal((await jsonRequest(request, votePath(otherSecond), "PUT", { value: 1 }, down.cookie)).statusCode, 200);
+
+    assert.deepEqual(await (await request(votePath(second), { headers: { cookie: up.cookie } })).json(), {
+      postId: second.id, value: null, score: 1, authorKarma: 0,
+    });
+    assert.deepEqual(await (await request(votePath(otherFirst), { headers: { cookie: down.cookie } })).json(), {
+      postId: otherFirst.id, value: null, score: 1, authorKarma: 2,
+    });
     assert.deepEqual(sums(app, second.id), { score: 1, authorKarma: 0 });
+    assert.deepEqual(sums(app, otherFirst.id), { score: 1, authorKarma: 2 });
+
     assert.equal((await request(`/api/posts/${post.id}`, { method: "DELETE", headers: { cookie: owner.cookie } })).statusCode, 204);
+    assert.deepEqual(await (await request(votePath(second), { headers: { cookie: up.cookie } })).json(), {
+      postId: second.id, value: null, score: 1, authorKarma: 1,
+    });
     assert.deepEqual(sums(app, second.id), { score: 1, authorKarma: 1 });
+    assert.deepEqual(sums(app, otherFirst.id), { score: 1, authorKarma: 2 });
     assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM post_votes WHERE post_id = ?").get(post.id).count, 0);
     assert.equal(app.database.prepare("PRAGMA integrity_check").get().integrity_check, "ok");
   });
@@ -149,6 +197,10 @@ test("SCN-RC-06-H4 admits authority before malformed payload validation with no 
     await fixedError(await jsonRequest(request, route, "PUT", body), 401, "Authentication required", ["vote-marker"]);
     await fixedError(await jsonRequest(request, route, "PUT", body, owner.cookie), 403, "Forbidden", ["vote-marker"]);
     app.database.prepare("UPDATE posts SET voting_state = 'locked' WHERE id = ?").run(post.id);
+    await fixedError(await jsonRequest(request, route, "PUT", body, stranger.cookie), 403, "Forbidden", ["vote-marker"]);
+    app.database.exec("PRAGMA ignore_check_constraints = ON");
+    app.database.prepare("UPDATE posts SET voting_state = 'maintenance' WHERE id = ?").run(post.id);
+    app.database.exec("PRAGMA ignore_check_constraints = OFF");
     await fixedError(await jsonRequest(request, route, "PUT", body, stranger.cookie), 403, "Forbidden", ["vote-marker"]);
     app.database.prepare("UPDATE posts SET voting_state = 'unlocked' WHERE id = ?").run(post.id);
     await fixedError(await jsonRequest(request, "/api/posts/missing-vote-marker/vote", "PUT", body, stranger.cookie), 404, "Not found", ["vote-marker", "missing-vote-marker"]);
@@ -184,41 +236,57 @@ test("SCN-RC-06-H6 rolls back an injected vote persistence failure and one retry
   }, { beforeVotePersist: () => { if (fail) { fail = false; throw new Error("vote-fault-marker"); } } });
 });
 
-test("SCN-RC-06-H6 serializes same-actor concurrent mutations to one durable final vote", async () => {
+test("SCN-RC-06-H6 serializes duplicate and mixed same-actor concurrent mutations", async () => {
   await withApp(async ({ app, path, request }) => {
     const { post } = await postOwner(request);
     const voter = await signup(request, "vote-concurrent");
-    const barrier = new SharedArrayBuffer(8);
-    const control = new Int32Array(barrier);
-    const workerPath = new URL("./vote-worker.js", import.meta.url);
-    const runs = [
-      startVoteWorker(workerPath, { path, cookie: voter.cookie, route: votePath(post), value: 1, barrier }),
-      startVoteWorker(workerPath, { path, cookie: voter.cookie, route: votePath(post), value: -1, barrier }),
-    ];
-    let lockHeld = false;
-    try {
-      await waitForWorkers(runs, "ready");
-      assert.equal(Atomics.load(control, 1), 2);
-      // A real competing writer makes the configured SQLite wait observable.
-      app.database.exec("BEGIN IMMEDIATE");
-      lockHeld = true;
-      Atomics.store(control, 0, 1);
-      assert.equal(Atomics.notify(control, 0, 2), 2);
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      app.database.exec("COMMIT");
-      lockHeld = false;
-      const results = await Promise.all(runs.map((run) => run.complete));
-      assert.deepEqual(results.flat().filter((message) => message.type === "result").map((message) => message.statusCode), [200, 200]);
-    } finally {
-      if (lockHeld) app.database.exec("ROLLBACK");
-      Atomics.store(control, 0, 1);
-      Atomics.notify(control, 0, 2);
-      await Promise.allSettled(runs.map((run) => run.worker.terminate()));
-    }
-    const rows = voteRows(app);
-    assert.equal(rows.length, 1);
-    assert.ok(rows[0].value === 1 || rows[0].value === -1);
-    assert.deepEqual(sums(app, post.id), { score: rows[0].value, authorKarma: rows[0].value });
+    const route = votePath(post);
+    const clearRows = () => app.database.prepare("DELETE FROM post_votes WHERE post_id = ?").run(post.id);
+    const assertFinalValue = (allowedValues) => {
+      const rows = voteRows(app);
+      assert.ok(rows.length <= 1);
+      const value = rows.length === 0 ? null : rows[0].value;
+      assert.ok(allowedValues.includes(value));
+      assert.deepEqual(sums(app, post.id), {
+        score: value ?? 0,
+        authorKarma: value ?? 0,
+      });
+    };
+
+    let results = await runConcurrentMutations(app, path, voter.cookie, route, [
+      { method: "PUT", value: 1 },
+      { method: "PUT", value: 1 },
+    ]);
+    assert.deepEqual(results.map((result) => result.statusCode), [200, 200]);
+    assertFinalValue([1]);
+
+    clearRows();
+    results = await runConcurrentMutations(app, path, voter.cookie, route, [
+      { method: "PUT", value: 1 },
+      { method: "DELETE" },
+    ]);
+    assert.deepEqual(results.map((result) => result.statusCode), [200, 204]);
+    assert.equal(results[1].body, "");
+    assertFinalValue([null, 1]);
+
+    clearRows();
+    app.database.prepare("INSERT INTO post_votes (post_id, voter_user_id, value) VALUES (?, ?, ?)").run(post.id, voter.account.id, 1);
+    results = await runConcurrentMutations(app, path, voter.cookie, route, [
+      { method: "DELETE" },
+      { method: "PUT", value: -1 },
+    ]);
+    assert.deepEqual(results.map((result) => result.statusCode), [204, 200]);
+    assert.equal(results[0].body, "");
+    assertFinalValue([null, -1]);
+
+    clearRows();
+    results = await runConcurrentMutations(app, path, voter.cookie, route, [
+      { method: "DELETE" },
+      { method: "DELETE" },
+    ]);
+    assert.deepEqual(results.map((result) => result.statusCode), [204, 204]);
+    assert.deepEqual(results.map((result) => result.body), ["", ""]);
+    assertFinalValue([null]);
   });
 });
 
