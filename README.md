@@ -23,6 +23,10 @@ Optional non-secret configuration is captured when the application starts:
 - `POST /api/auth/login`
 - `POST /api/auth/logout`
 - `GET`, `PATCH`, and `DELETE /api/me`
+- `GET`, `PATCH /api/me/preferences`
+- `GET /api/me/saved`
+- `GET /api/me/history`
+- `PUT`, `DELETE /api/posts/:id/save`
 - `GET /api/users/:username`
 - `GET /api/communities`
 - `POST /api/communities`
@@ -51,5 +55,7 @@ Current members can publish JSON text, HTTP(S) link, or image media posts. Media
 Authenticated active users can set or replace their own vote as JSON `{ "value": 1 }` or `{ "value": -1 }` on another active author's unlocked post, inspect their current vote, or clear it. Vote score and author karma are derived from current durable votes; no vote ledger or aggregate override route is exposed.
 
 Active community members can add JSON comments to a readable post, either top-level or with a same-post `parentId`. Conversations are depth-first pre-order pages; `limit` defaults to 25 and accepts 1 through 100. Returned cursors are opaque, resumable snapshots, so later comments do not enter an existing traversal. Comment authors may edit active comments or replace them with privacy-preserving tombstones while descendants retain their original nesting.
+
+Authenticated active users can save a readable post and retrieve their saved posts or 90-day post-view history through owner-scoped, opaque paginated snapshots. A successful authenticated non-media post read records the latest view for that user and post. Preferences default to `{ "theme": "system", "compactMode": false }`; preference patches update only supplied valid fields atomically. Other users' saved and history routes always deny without revealing private records.
 
 Run `npm run typecheck`, `npm test`, and `npm run build` before submitting changes.
