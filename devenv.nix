@@ -30,9 +30,9 @@ in
   # Devenv 2.2.2's generated container-copy task exports values from a
   # non-bash package, which newer task validation rejects during shell
   # evaluation. The setup contract does not use devenv's container tasks.
+  # Override only the offending exports: forcing a package through `pkgs`
+  # here makes task validation recursively depend on shell materialization.
   tasks."devenv:container:copy" = {
-    package = lib.mkForce pkgs.bash;
-    binary = lib.mkForce "bash";
     exports = lib.mkForce [ ];
   };
 }
