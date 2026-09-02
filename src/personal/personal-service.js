@@ -1,13 +1,21 @@
 // @ts-expect-error Node built-in declarations are outside this JavaScript slice's ambient types.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { postRepresentation } from "../post/post-representation.js";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
+// Traversals remain restart-resumable for one day; identical snapshots share that durable lease.
+const TRAVERSAL_TTL_MS = DAY_MS;
 const defaultPreferences = Object.freeze({ theme: "system", compactMode: false });
 /** @param {{exec: (sql: string) => void}} database */
 function rollback(database) { try { database.exec("ROLLBACK"); } catch {} }
 /** @param {{theme: string, compact_mode: number} | undefined} row */
 function preferenceRepresentation(row) { return row ? { theme: row.theme, compactMode: Boolean(row.compact_mode) } : { ...defaultPreferences }; }
+/** @param {{post_id: string, saved_at?: number, viewed_at?: number}[]} rows */
+function membershipKey(rows) {
+  const digest = createHash("sha256");
+  for (const row of rows) digest.update(JSON.stringify([row.post_id, row.saved_at ?? row.viewed_at]));
+  return digest.digest("hex");
+}
 
 export class PersonalService {
   /** @param {{repository: import("./personal-repository.js").PersonalRepository, database: {exec: (sql: string) => void}, now?: () => number, beforeSavedPersist?: () => void, beforeHistoryPersist?: () => void, beforePreferencePersist?: () => void}} options */
@@ -52,24 +60,37 @@ export class PersonalService {
       this.beforePreferencePersist(); this.repository.savePreferences(userId, next.theme, next.compactMode); this.database.exec("COMMIT"); return { kind: "success", preferences: next };
     } catch { rollback(this.database); return { kind: "unavailable" }; }
   }
-  /** @param {string} userId @param {"saved" | "history"} kind @param {number} limit @param {string | undefined} cursor */
+  /** @param {any[]} rows */
+  representations(rows) {
+    return rows.map((row) => ({ post: postRepresentation(row.id ? row : this.repository.findReadablePost(row.post_id)), viewedAt: new Date(row.event_at ?? row.saved_at ?? row.viewed_at).toISOString() }));
+  }
+  /** @param {string} userId @param {"saved" | "history"} kind @param {number} limit @param {string | undefined} cursor
+   * @returns {{kind: "success", items: any[], nextCursor: string | null} | {kind: "lost-authority" | "invalid-page" | "unavailable"}} */
   listing(userId, kind, limit, cursor) {
     try {
       this.database.exec("BEGIN IMMEDIATE");
       if (!this.repository.isActiveUser(userId)) { rollback(this.database); return { kind: "lost-authority" }; }
-      const cutoff = this.now() - 90 * DAY_MS; if (kind === "history") this.repository.expireHistory(userId, cutoff);
+      const now = this.now(); const cutoff = now - 90 * DAY_MS;
+      this.repository.reclaimTraversals(now);
+      if (kind === "history") this.repository.expireHistory(userId, cutoff);
       let traversalId; let start;
       if (cursor) {
-        const token = this.repository.tokenFor(cursor, userId, kind);
+        const token = this.repository.tokenFor(cursor, userId, kind, now);
         if (!token) { rollback(this.database); return { kind: "invalid-page" }; }
         traversalId = token.traversal_id; start = token.start_ordinal;
       } else {
-        const rows = this.repository.rows(userId, kind, cutoff); if (rows.length === 0) { this.database.exec("COMMIT"); return { kind: "success", items: [], nextCursor: null }; }
-        traversalId = randomUUID(); start = 0; this.repository.createTraversal(traversalId, userId, kind, rows);
+        const rows = this.repository.rows(userId, kind, cutoff);
+        if (rows.length <= limit) {
+          const items = this.representations(rows); this.database.exec("COMMIT"); return { kind: "success", items, nextCursor: null };
+        }
+        const key = membershipKey(rows);
+        traversalId = this.repository.traversalFor(userId, kind, key, now) ??
+          this.repository.createTraversal(randomUUID(), userId, kind, key, now, now + TRAVERSAL_TTL_MS, rows);
+        start = 0;
       }
       const rows = this.repository.pageFor(traversalId, start, limit); const nextStart = rows.length ? rows.at(-1).ordinal + 1 : start;
       const nextCursor = this.repository.hasMore(traversalId, nextStart) ? this.repository.createToken(randomUUID(), traversalId, nextStart) : null;
-      this.database.exec("COMMIT"); return { kind: "success", items: rows.map((/** @type {any} */ row) => ({ post: postRepresentation(row), viewedAt: new Date(row.event_at).toISOString() })), nextCursor };
+      const items = this.representations(rows); this.database.exec("COMMIT"); return { kind: "success", items, nextCursor };
     } catch { rollback(this.database); return { kind: "unavailable" }; }
   }
 }
