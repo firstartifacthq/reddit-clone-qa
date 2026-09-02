@@ -16,6 +16,9 @@ import { validatePersonalPage, validatePreferencePatch } from "./personal/person
 import { VoteRepository } from "./vote/vote-repository.js";
 import { VoteService } from "./vote/vote-service.js";
 import { parseVoteJson, validateVote } from "./vote/vote-validation.js";
+import { SearchRepository } from "./search/search-repository.js";
+import { SearchService } from "./search/search-service.js";
+import { validateSearch } from "./search/search-validation.js";
 import { validateCommentPage } from "./comment/comment-validation.js";
 import { canonicalCommunityName } from "./community/community-validation.js";
 import { normalizeUsername } from "./account/username.js";
@@ -24,11 +27,12 @@ import {
   invalidRequestError, notFoundError, profileUnavailableError, invalidPostError, postConflictError, postUnavailableError,
   invalidCommentError, invalidCommentPageError, commentUnavailableError,
   invalidPersonalPageError, invalidPreferencesError, personalUnavailableError, invalidVoteError, voteUnavailableError,
+  invalidSearchError, searchUnavailableError,
 } from "./http-errors.js";
 import { renderShell } from "./public-shell.js";
 
 /** @typedef {{exec: (sql: string) => void, prepare: (sql: string) => any, close: () => void}} Database */
-/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string, beforeMediaPersist?: () => void, beforeCommentPersist?: () => void, beforeSavedPersist?: () => void, beforeHistoryPersist?: () => void, beforePreferencePersist?: () => void, beforeVotePersist?: () => void}} AppOptions */
+/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string, beforeMediaPersist?: () => void, beforeCommentPersist?: () => void, beforeSavedPersist?: () => void, beforeHistoryPersist?: () => void, beforePreferencePersist?: () => void, beforeVotePersist?: () => void, beforeSearchRead?: () => void}} AppOptions */
 /** @typedef {Record<string, string | string[] | undefined>} RequestHeaders */
 /** @typedef {{method?: string, path?: string, headers?: RequestHeaders, payload?: string | Uint8Array}} AppRequest */
 /** @typedef {{status: number, headers: Record<string, string>, body: string | Uint8Array}} AppResponse */
@@ -118,7 +122,7 @@ function isJsonContentType(contentType) { return typeof contentType === "string"
 export function createApp(options = {}) {
   const {
     database: injectedDatabase, now, randomToken, beforeMediaPersist, beforeCommentPersist,
-    beforeSavedPersist, beforeHistoryPersist, beforePreferencePersist, beforeVotePersist, ...configOptions
+    beforeSavedPersist, beforeHistoryPersist, beforePreferencePersist, beforeVotePersist, beforeSearchRead, ...configOptions
   } = options;
   const config = createConfig(configOptions);
   const database = injectedDatabase || openDatabase(config.databasePath);
@@ -129,6 +133,7 @@ export function createApp(options = {}) {
   const commentRepository = new CommentRepository(database);
   const personalRepository = new PersonalRepository(database);
   const voteRepository = new VoteRepository(database);
+  const searchRepository = new SearchRepository(database);
   const auth = new AuthService({ repository: authRepository, database, config, now, randomToken });
   const profiles = new ProfileService({ repository: profileRepository, database, now });
   const communities = new CommunityService({ repository: communityRepository, database, now });
@@ -136,6 +141,7 @@ export function createApp(options = {}) {
   const comments = new CommentService({ repository: commentRepository, database, beforeCommentPersist });
   const personal = new PersonalService({ repository: personalRepository, database, now, beforeSavedPersist, beforeHistoryPersist, beforePreferencePersist });
   const votes = new VoteService({ repository: voteRepository, database, beforeVotePersist });
+  const search = new SearchService({ repository: searchRepository, beforeSearchRead });
   const ownDatabase = !injectedDatabase;
 
   /** @param {string} token @param {number} maxAgeSeconds */
@@ -156,6 +162,13 @@ export function createApp(options = {}) {
       const username = publicUsername(url.pathname);
       const isPublicUserRoute = /^\/api\/users\/[^/]+$/.test(url.pathname);
 
+      if (method === "GET" && url.pathname === "/api/search") {
+        const query = validateSearch(url);
+        if (!query) return json(400, invalidSearchError);
+        const result = search.find(query, account);
+        if (result.kind === "success") return json(200, { results: result.results });
+        return json(503, searchUnavailableError, { "retry-after": "1" });
+      }
       if (method === "POST" && url.pathname === "/api/auth/signup") {
         const result = auth.signup(parseJson(request.payload));
         if (result.kind === "success") return json(201, result.account, { "set-cookie": sessionCookie(result.token, Math.ceil(config.sessionLifetimeMs / 1_000)) });
