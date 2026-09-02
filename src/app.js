@@ -24,7 +24,7 @@ import {
 import { renderShell } from "./public-shell.js";
 
 /** @typedef {{exec: (sql: string) => void, prepare: (sql: string) => any, close: () => void}} Database */
-/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string, beforeMediaPersist?: () => void, beforeCommentPersist?: () => void, searchRepository?: {list: (type?: "community" | "post" | "comment") => any[]}}} AppOptions */
+/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string, beforeAuthResolve?: () => void, beforeMediaPersist?: () => void, beforeCommentPersist?: () => void, searchRepository?: {list: (type?: "community" | "post" | "comment") => any[]}}} AppOptions */
 /** @typedef {Record<string, string | string[] | undefined>} RequestHeaders */
 /** @typedef {{method?: string, path?: string, headers?: RequestHeaders, payload?: string | Uint8Array}} AppRequest */
 /** @typedef {{status: number, headers: Record<string, string>, body: string | Uint8Array}} AppResponse */
@@ -104,7 +104,7 @@ function isJsonContentType(contentType) { return typeof contentType === "string"
 
 /** @param {AppOptions} [options] */
 export function createApp(options = {}) {
-  const { database: injectedDatabase, now, randomToken, searchRepository: injectedSearchRepository, ...configOptions } = options;
+  const { database: injectedDatabase, now, randomToken, beforeAuthResolve, searchRepository: injectedSearchRepository, ...configOptions } = options;
   const config = createConfig(configOptions);
   const database = injectedDatabase || openDatabase(config.databasePath);
   const authRepository = new AuthRepository(database);
@@ -112,7 +112,7 @@ export function createApp(options = {}) {
   const communityRepository = new CommunityRepository(database);
   const postRepository = new PostRepository(database);
   const commentRepository = new CommentRepository(database);
-  const auth = new AuthService({ repository: authRepository, database, config, now, randomToken });
+  const auth = new AuthService({ repository: authRepository, database, config, now, randomToken, beforeResolve: beforeAuthResolve });
   const profiles = new ProfileService({ repository: profileRepository, database, now });
   const communities = new CommunityService({ repository: communityRepository, database, now });
   const posts = new PostService({ repository: postRepository, database, beforeMediaPersist: options.beforeMediaPersist });
@@ -139,16 +139,22 @@ export function createApp(options = {}) {
       const url = new URL(request.path || "/", "http://localhost");
       const headers = headersFacade(request.headers || {});
       const token = parseCookies(headers.cookie)[config.cookieName];
-      const account = auth.resolve(token);
-      const username = publicUsername(url.pathname);
-      const isPublicUserRoute = /^\/api\/users\/[^/]+$/.test(url.pathname);
 
       if (method === "GET" && url.pathname === "/api/search") {
         const searchQuery = validateSearchQuery(url.search.slice(1));
         if (!searchQuery) return json(400, invalidSearchError);
-        const result = search.search(searchQuery, account);
-        return result.kind === "success" ? json(200, { results: result.results }) : json(503, searchUnavailableError);
+        try {
+          const account = auth.resolve(token);
+          const result = search.search(searchQuery, account);
+          return result.kind === "success" ? json(200, { results: result.results }) : json(503, searchUnavailableError);
+        } catch {
+          return json(503, searchUnavailableError);
+        }
       }
+
+      const account = auth.resolve(token);
+      const username = publicUsername(url.pathname);
+      const isPublicUserRoute = /^\/api\/users\/[^/]+$/.test(url.pathname);
       if (method === "POST" && url.pathname === "/api/auth/signup") {
         const result = auth.signup(parseJson(request.payload));
         if (result.kind === "success") return json(201, result.account, { "set-cookie": sessionCookie(result.token, Math.ceil(config.sessionLifetimeMs / 1_000)) });

@@ -7,7 +7,7 @@ import { accountRepresentation } from "./account-representation.js";
 /** @typedef {import("./auth-repository.js").AuthRepository} AuthRepository */
 /** @typedef {{sessionLifetimeMs: number}} Config */
 /** @typedef {{exec: (sql: string) => void}} Database */
-/** @typedef {{repository: AuthRepository, database: Database, config: Config, now?: () => number, randomToken?: () => string}} ServiceOptions */
+/** @typedef {{repository: AuthRepository, database: Database, config: Config, now?: () => number, randomToken?: () => string, beforeResolve?: () => void}} ServiceOptions */
 /** @typedef {{username: string, password: string}} Credentials */
 /** @typedef {{token: string, digest: string, userId: string, issuedAt: number, expiresAt: number}} Session */
 
@@ -35,12 +35,13 @@ function decodeVerifier(value) {
 
 export class AuthService {
   /** @param {ServiceOptions} options */
-  constructor({ repository, database, config, now = Date.now, randomToken = () => randomBytes(32).toString("base64url") }) {
+  constructor({ repository, database, config, now = Date.now, randomToken = () => randomBytes(32).toString("base64url"), beforeResolve = () => {} }) {
     this.repository = repository;
     this.database = database;
     this.config = config;
     this.now = now;
     this.randomToken = randomToken;
+    this.beforeResolve = beforeResolve;
   }
 
   /** @param {unknown} body */
@@ -80,6 +81,7 @@ export class AuthService {
   /** @param {unknown} token @returns {{id: string, username: string} | undefined} */
   resolve(token) {
     if (typeof token !== "string" || !/^[A-Za-z0-9_-]{20,}$/.test(token)) return undefined;
+    this.beforeResolve();
     const account = this.repository.findAuthorizedAccount(digest(token), this.now());
     return account ? accountRepresentation(account) : undefined;
   }

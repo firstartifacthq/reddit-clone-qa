@@ -37,15 +37,19 @@ export class SearchService {
   /** @param {{query: string, type?: "community" | "post" | "comment"}} searchQuery @param {unknown} actor */
   search(searchQuery, actor) {
     try {
-      const readableCommunities = searchQuery.type === "post" || searchQuery.type === "comment"
-        ? new Set()
-        : new Set(this.readableCommunities(actor));
+      /** @type {Set<string> | undefined} */
+      let readableCommunities;
       /** @type {Map<string, SearchResult>} */
       const results = new Map();
       for (const candidate of this.repository.list(searchQuery.type)) {
-        const readable = candidate.type === "community"
-          ? readableCommunities.has(candidate.canonicalName)
-          : candidate.type === "post" ? Boolean(this.readPost(candidate.id, actor)) : Boolean(this.readComment(candidate.id, actor));
+        let readable;
+        if (candidate.type === "community") {
+          const admittedCommunities = readableCommunities || new Set(this.readableCommunities(actor));
+          readableCommunities = admittedCommunities;
+          readable = admittedCommunities.has(candidate.canonicalName);
+        } else {
+          readable = candidate.type === "post" ? Boolean(this.readPost(candidate.id, actor)) : Boolean(this.readComment(candidate.id, actor));
+        }
         if (!readable || !matches(candidate, searchQuery.query)) continue;
         const result = serialize(candidate);
         results.set(`${result.type}:${identity(result)}`, result);

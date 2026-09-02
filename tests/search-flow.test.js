@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createApp } from "../src/app.js";
+import { SearchService } from "../src/search/search-service.js";
 
 const password = "correct-horse-battery";
 
@@ -71,10 +72,13 @@ test("SCN-RC-08-H2 narrows supported filters and treats no matches as success", 
   });
 });
 
-test("SCN-RC-08-H3 rejects invalid raw query forms before retrieval", async () => {
-  let calls = 0;
-  const repository = { list() { calls += 1; throw new Error("retrieval marker"); } };
+test("SCN-RC-08-H3 rejects invalid raw query forms before actor or corpus retrieval", async () => {
+  let actorCalls = 0;
+  let actorUnavailable = false;
+  let corpusCalls = 0;
+  const repository = { list() { corpusCalls += 1; throw new Error("retrieval marker"); } };
   await withApp(async ({ app, request }) => {
+    const owner = await signup(request, "validation-owner");
     const before = tableCounts(app);
     const invalid = [
       "/api/search", "/api/search?q=one&q=two", "/api/search?q=%20%09", `/api/search?q=${"x".repeat(201)}`,
@@ -82,13 +86,29 @@ test("SCN-RC-08-H3 rejects invalid raw query forms before retrieval", async () =
       "/api/search?q=ok&type=post&type=comment", "/api/search?%71=one&%71=two",
     ];
     for (const path of invalid) {
-      const response = await request(path);
+      const response = await request(path, { headers: { cookie: owner.cookie } });
       const text = await fixed(response, 400, { error: "Invalid search" });
       assert.equal(text.includes("retrieval marker"), false);
       assert.deepEqual(tableCounts(app), before);
     }
-    assert.equal(calls, 0);
-  }, { searchRepository: repository });
+    assert.equal(actorCalls, 0);
+    assert.equal(corpusCalls, 0);
+
+    actorUnavailable = true;
+    const unavailable = await request("/api/search?q=valid", { headers: { cookie: owner.cookie } });
+    const text = await fixed(unavailable, 503, { error: "Search service unavailable" });
+    assert.equal(text.includes("actor marker"), false);
+    assert.equal(text.includes("results"), false);
+    assert.equal(actorCalls, 1);
+    assert.equal(corpusCalls, 0);
+    assert.deepEqual(tableCounts(app), before);
+  }, {
+    searchRepository: repository,
+    beforeAuthResolve() {
+      actorCalls += 1;
+      if (actorUnavailable) throw new Error("actor marker");
+    },
+  });
 });
 
 test("SCN-RC-08-H4 preserves direct-read parity and does not disclose deleted resources", async () => {
@@ -108,6 +128,62 @@ test("SCN-RC-08-H4 preserves direct-read parity and does not disclose deleted re
     assert.equal(text.includes("deleted-needle-marker"), false);
     assert.equal(text.includes("redacted"), false);
   });
+});
+
+test("MNT-RC08-002 denies community, post, and comment candidates through direct readers", () => {
+  const service = new SearchService({
+    repository: { list: () => [
+      { type: "community", canonicalName: "needle_hub", displayName: "Needle Hub" },
+      { type: "post", id: "post-1", title: "needle post", text: null, url: null },
+      { type: "comment", id: "comment-1", body: "needle comment" },
+    ] },
+    readableCommunities: () => [],
+    readPost: () => undefined,
+    readComment: () => undefined,
+  });
+
+  assert.deepEqual(service.search({ query: "needle" }, undefined), { kind: "success", results: [] });
+});
+
+test("MNT-RC08-002 discards admitted results when any direct reader throws", () => {
+  const community = { type: /** @type {const} */ ("community"), canonicalName: "needle_hub", displayName: "Needle Hub" };
+  const post = { type: /** @type {const} */ ("post"), id: "post-1", title: "needle post", text: null, url: null };
+  const comment = { type: /** @type {const} */ ("comment"), id: "comment-1", body: "needle comment" };
+  const scenarios = [
+    {
+      candidates: [post, community],
+      throwingReader: "readableCommunities",
+      admittedReader: "readPost",
+    },
+    {
+      candidates: [community, post],
+      throwingReader: "readPost",
+      admittedReader: "readableCommunities",
+    },
+    {
+      candidates: [post, comment],
+      throwingReader: "readComment",
+      admittedReader: "readPost",
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    let admittedCalls = 0;
+    const readers = {
+      readableCommunities: () => ["needle_hub"],
+      readPost: () => ({}),
+      readComment: () => ({}),
+    };
+    readers[scenario.admittedReader] = () => {
+      admittedCalls += 1;
+      return scenario.admittedReader === "readableCommunities" ? ["needle_hub"] : {};
+    };
+    readers[scenario.throwingReader] = () => { throw new Error(`${scenario.throwingReader} marker`); };
+    const service = new SearchService({ repository: { list: () => scenario.candidates }, ...readers });
+
+    assert.deepEqual(service.search({ query: "needle" }, undefined), { kind: "unavailable" });
+    assert.equal(admittedCalls, 1, `${scenario.throwingReader} failed before one candidate was admitted`);
+  }
 });
 
 test("SCN-RC-08-H5 reflects successful lifecycle changes and preserves rejected mutations", async () => {
