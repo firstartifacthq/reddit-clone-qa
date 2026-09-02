@@ -19,3 +19,5 @@ export const invalidVoteError = Object.freeze({ error: "Invalid vote" });
 export const voteUnavailableError = Object.freeze({ error: "Vote service unavailable" });
 export const invalidSearchError = Object.freeze({ error: "Invalid search" });
 export const searchUnavailableError = Object.freeze({ error: "Search unavailable" });
+export const invalidFeedPageError = Object.freeze({ error: "Invalid feed page" });
+export const feedUnavailableError = Object.freeze({ error: "Feed unavailable" });

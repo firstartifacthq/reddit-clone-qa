@@ -18,10 +18,11 @@ function parseBody(body) { try { return JSON.parse(strictUtf8.decode(rawBytes(bo
 function bodyDigest(body) { return createHash("sha256").update(rawBytes(body)).digest("hex"); }
 
 export class PostService {
-  /** @param {{repository: import("./post-repository.js").PostRepository, database: {exec: (sql: string) => void}, beforeMediaPersist?: () => void}} options */
-  constructor({ repository, database, beforeMediaPersist = () => {} }) {
+  /** @param {{repository: import("./post-repository.js").PostRepository, database: {exec: (sql: string) => void}, now?: () => number, beforeMediaPersist?: () => void}} options */
+  constructor({ repository, database, now = Date.now, beforeMediaPersist = () => {} }) {
     this.repository = repository;
     this.database = database;
+    this.now = now;
     this.beforeMediaPersist = beforeMediaPersist;
   }
 
@@ -49,7 +50,7 @@ export class PostService {
       }
       const id = randomUUID();
       const valid = /** @type {{post: {type: string, title: string, text?: string, url?: string, media?: {filename: string, contentType: string, bytes: Uint8Array}}}} */ (validation);
-      const post = { id, community, authorId: userId, ...valid.post };
+      const post = { id, community, authorId: userId, publishedAt: this.now(), ...valid.post };
       if (post.type === "media") this.beforeMediaPersist();
       this.repository.createPost(post);
       const stored = this.repository.findPost(id);
