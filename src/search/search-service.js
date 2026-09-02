@@ -4,12 +4,31 @@
 
 const typeRank = { community: 0, post: 1, comment: 2 };
 
-/** @param {SearchCandidate} candidate @param {string} query */
-function matches(candidate, query) {
+/** @param {string[]} values @param {string} query */
+function textMatches(values, query) {
   const needle = query.toLowerCase();
-  if (candidate.type === "community") return [candidate.canonicalName, candidate.displayName].some((value) => value.toLowerCase().includes(needle));
-  if (candidate.type === "post") return [candidate.title, candidate.text, candidate.url].some((value) => typeof value === "string" && value.toLowerCase().includes(needle));
-  return candidate.body.toLowerCase().includes(needle);
+  return values.some((value) => value.toLowerCase().includes(needle));
+}
+
+/** @param {SearchCandidate & {type: "community"}} candidate @param {string} query */
+function communityMatches(candidate, query) {
+  return textMatches([candidate.canonicalName, candidate.displayName], query);
+}
+
+/** @param {unknown} directRead @param {string} id @param {string} query */
+function postMatches(directRead, id, query) {
+  if (!directRead || typeof directRead !== "object") return false;
+  const post = /** @type {Record<string, unknown>} */ (directRead);
+  if (post.id !== id || typeof post.title !== "string") return false;
+  return textMatches([post.title, post.text, post.url].filter((value) => typeof value === "string"), query);
+}
+
+/** @param {unknown} directRead @param {string} id @param {string} query */
+function commentMatches(directRead, id, query) {
+  if (!directRead || typeof directRead !== "object") return false;
+  const comment = /** @type {Record<string, unknown>} */ (directRead);
+  return comment.id === id && comment.state === "active" && typeof comment.body === "string"
+    && textMatches([comment.body], query);
 }
 
 /** @param {SearchCandidate} candidate @returns {SearchResult} */
@@ -42,15 +61,19 @@ export class SearchService {
       /** @type {Map<string, SearchResult>} */
       const results = new Map();
       for (const candidate of this.repository.list(searchQuery.type)) {
-        let readable;
+        let currentMatch;
         if (candidate.type === "community") {
           const admittedCommunities = readableCommunities || new Set(this.readableCommunities(actor));
           readableCommunities = admittedCommunities;
-          readable = admittedCommunities.has(candidate.canonicalName);
+          currentMatch = admittedCommunities.has(candidate.canonicalName) && communityMatches(candidate, searchQuery.query);
+        } else if (candidate.type === "post") {
+          currentMatch = postMatches(this.readPost(candidate.id, actor), candidate.id, searchQuery.query);
+        } else if (candidate.type === "comment") {
+          currentMatch = commentMatches(this.readComment(candidate.id, actor), candidate.id, searchQuery.query);
         } else {
-          readable = candidate.type === "post" ? Boolean(this.readPost(candidate.id, actor)) : Boolean(this.readComment(candidate.id, actor));
+          throw new Error("unsupported search candidate");
         }
-        if (!readable || !matches(candidate, searchQuery.query)) continue;
+        if (!currentMatch) continue;
         const result = serialize(candidate);
         results.set(`${result.type}:${identity(result)}`, result);
       }

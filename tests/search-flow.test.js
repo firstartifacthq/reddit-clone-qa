@@ -244,3 +244,34 @@ test("SCN-RC-08-H7 successful results have only supported minimal discriminators
     assert.equal(JSON.stringify(body).includes("count"), false);
   });
 });
+
+test("SCN-RC-08-H7 matches only current direct-read text and excludes tombstones", () => {
+  const candidates = [
+    { type: /** @type {const} */ ("post"), id: "post-removed", title: "needle removed", text: null, url: null },
+    { type: /** @type {const} */ ("post"), id: "post-current", title: "old title", text: null, url: null },
+    { type: /** @type {const} */ ("comment"), id: "comment-deleted", body: "needle removed" },
+    { type: /** @type {const} */ ("comment"), id: "comment-current", body: "old body" },
+  ];
+  const posts = new Map([
+    ["post-removed", { id: "post-removed", type: "text", title: "current title", text: "current body" }],
+    ["post-current", { id: "post-current", type: "text", title: "needle current", text: "current body" }],
+  ]);
+  const comments = new Map([
+    ["comment-deleted", { id: "comment-deleted", state: "deleted" }],
+    ["comment-current", { id: "comment-current", state: "active", body: "needle current" }],
+  ]);
+  const service = new SearchService({
+    repository: { list: () => candidates },
+    readableCommunities: () => [],
+    readPost: (id) => posts.get(id),
+    readComment: (id) => comments.get(id),
+  });
+
+  assert.deepEqual(service.search({ query: "needle" }, undefined), {
+    kind: "success",
+    results: [
+      { type: "post", id: "post-current" },
+      { type: "comment", id: "comment-current" },
+    ],
+  });
+});
