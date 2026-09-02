@@ -12,10 +12,10 @@ async function withDirectory(run) {
   try { await run(directory); } finally { await rm(directory, { recursive: true, force: true }); }
 }
 
-test("comment migration preserves structural and tombstone constraints through version 6", async () => {
+test("comment migration preserves structural and tombstone constraints through version 7", async () => {
   await withDirectory(async (directory) => {
     const path = join(directory, "comments.sqlite"); const database = openDatabase(path);
-    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 6);
+    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 7);
     database.prepare("INSERT INTO users (id, username, password_salt, password_verifier, created_at) VALUES (?, ?, ?, ?, ?)").run("owner", "owner-user", "salt", "verifier", 1);
     database.prepare("INSERT INTO communities (canonical_name, display_name, owner_user_id, created_at) VALUES (?, ?, ?, ?)").run("comments", "Comments", "owner", 1);
     database.prepare("INSERT INTO posts (id, community_name, author_user_id, type, title, text_content) VALUES (?, ?, ?, ?, ?, ?)").run("post", "comments", "owner", "text", "Title", "text");
@@ -37,7 +37,7 @@ test("comment migration preserves structural and tombstone constraints through v
     assert.equal(database.prepare("SELECT COUNT(*) AS count FROM comments").get().count, 0);
     assert.equal(database.prepare("SELECT COUNT(*) AS count FROM comment_traversals").get().count, 0);
     assert.equal(database.prepare("PRAGMA integrity_check").get().integrity_check, "ok"); database.close();
-    const reopened = openDatabase(path); assert.equal(reopened.prepare("PRAGMA user_version").get().user_version, 6); reopened.close();
+    const reopened = openDatabase(path); assert.equal(reopened.prepare("PRAGMA user_version").get().user_version, 7); reopened.close();
   });
 });
 
@@ -58,7 +58,7 @@ test("comment migration upgrades a populated version 4 database", async () => {
     for (const name of ["001-auth.sql", "002-profile-lifecycle.sql", "003-community-roles.sql", "004-posts.sql"]) legacy.exec(readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
     legacy.exec("PRAGMA user_version = 4"); legacy.close();
     const upgraded = openDatabase(path);
-    assert.equal(upgraded.prepare("PRAGMA user_version").get().user_version, 6);
+    assert.equal(upgraded.prepare("PRAGMA user_version").get().user_version, 7);
     assert.equal(upgraded.prepare("SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'table' AND name IN ('comments', 'comment_traversals', 'comment_traversal_items', 'comment_page_tokens')").get().count, 4);
     assert.equal(upgraded.prepare("PRAGMA integrity_check").get().integrity_check, "ok"); upgraded.close();
   });

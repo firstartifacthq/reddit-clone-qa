@@ -25,6 +25,7 @@ const communityMigration = migration("003-community-roles.sql");
 const postMigration = migration("004-posts.sql");
 const commentMigration = migration("005-comments.sql");
 const voteMigration = migration("006-votes.sql");
+const feedMigration = migration("007-feeds.sql");
 
 /** @param {Database} database */
 function assertCommunityOwnerInvariant(database) {
@@ -92,6 +93,136 @@ function assertVoteInvariant(database) {
   }
 }
 
+/** @param {string | undefined} sql */
+function normalizeSchemaSql(sql) {
+  return typeof sql === "string" ? sql.replace(/\s+/g, " ").trim().replace(/;$/, "") : "";
+}
+
+/** @param {Database} database @param {string} name */
+function schemaSql(database, name) {
+  return normalizeSchemaSql(database.prepare("SELECT sql FROM sqlite_schema WHERE name = ?").get(name)?.sql);
+}
+
+/** @param {Database} database @param {string} table @param {[string, string, number, number][]} expected */
+function hasExactColumns(database, table, expected) {
+  const actual = /** @type {{name: string, type: string, notnull: number, pk: number}[]} */ (
+    database.prepare(`PRAGMA table_info(${table})`).all());
+  return actual.length === expected.length && expected.every(([name, type, notnull, pk], index) => {
+    const column = actual[index];
+    return column.name === name && column.type === type && column.notnull === notnull && column.pk === pk;
+  });
+}
+
+/** @param {Database} database @param {string} table @param {string} referencedTable @param {string} from @param {string} to */
+function hasCascade(database, table, referencedTable, from, to) {
+  const foreignKeys = /** @type {{table: string, from: string, to: string, on_delete: string}[]} */ (
+    database.prepare(`PRAGMA foreign_key_list(${table})`).all());
+  return foreignKeys.some((foreignKey) => foreignKey.table === referencedTable && foreignKey.from === from
+    && foreignKey.to === to && foreignKey.on_delete === "CASCADE");
+}
+
+/** @param {Database} database @param {string} name @param {string} table @param {string[]} columns */
+function hasExactIndex(database, name, table, columns) {
+  const index = database.prepare("SELECT tbl_name, sql FROM sqlite_schema WHERE type = 'index' AND name = ?").get(name);
+  if (index?.tbl_name !== table || !index.sql) return false;
+  const actual = /** @type {{name: string}[]} */ (database.prepare(`PRAGMA index_info(${name})`).all());
+  return actual.length === columns.length && actual.every((column, position) => column.name === columns[position]);
+}
+
+/** @param {Database} database */
+function assertFeedInvariant(database) {
+  const expectedTables = {
+    post_creation_order: `CREATE TABLE post_creation_order (
+      post_id TEXT PRIMARY KEY NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+      sequence INTEGER NOT NULL UNIQUE CHECK (sequence > 0)
+    )`,
+    feed_traversals: `CREATE TABLE feed_traversals (
+      id TEXT PRIMARY KEY NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('home', 'popular', 'community')),
+      community_name TEXT,
+      principal_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL CHECK (expires_at > created_at),
+      CHECK ((kind = 'community' AND community_name IS NOT NULL) OR (kind IN ('home', 'popular') AND community_name IS NULL))
+    )`,
+    feed_traversal_items: `CREATE TABLE feed_traversal_items (
+      traversal_id TEXT NOT NULL REFERENCES feed_traversals(id) ON DELETE CASCADE,
+      ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+      post_id TEXT NOT NULL,
+      score INTEGER NOT NULL,
+      PRIMARY KEY (traversal_id, ordinal),
+      UNIQUE (traversal_id, post_id)
+    )`,
+    feed_page_tokens: `CREATE TABLE feed_page_tokens (
+      token TEXT PRIMARY KEY NOT NULL,
+      traversal_id TEXT NOT NULL REFERENCES feed_traversals(id) ON DELETE CASCADE,
+      start_ordinal INTEGER NOT NULL CHECK (start_ordinal >= 0),
+      UNIQUE (traversal_id, start_ordinal)
+    )`,
+  };
+  const tablesValid = Object.entries(expectedTables).every(([name, sql]) =>
+    schemaSql(database, name) === normalizeSchemaSql(sql));
+  const columnsValid = hasExactColumns(database, "post_creation_order", [
+    ["post_id", "TEXT", 1, 1], ["sequence", "INTEGER", 1, 0],
+  ]) && hasExactColumns(database, "feed_traversals", [
+    ["id", "TEXT", 1, 1], ["kind", "TEXT", 1, 0], ["community_name", "TEXT", 0, 0],
+    ["principal_id", "TEXT", 1, 0], ["created_at", "INTEGER", 1, 0], ["expires_at", "INTEGER", 1, 0],
+  ]) && hasExactColumns(database, "feed_traversal_items", [
+    ["traversal_id", "TEXT", 1, 1], ["ordinal", "INTEGER", 1, 2],
+    ["post_id", "TEXT", 1, 0], ["score", "INTEGER", 1, 0],
+  ]) && hasExactColumns(database, "feed_page_tokens", [
+    ["token", "TEXT", 1, 1], ["traversal_id", "TEXT", 1, 0], ["start_ordinal", "INTEGER", 1, 0],
+  ]);
+  const expectedTriggers = {
+    posts_assign_creation_order: `CREATE TRIGGER posts_assign_creation_order AFTER INSERT ON posts BEGIN
+      INSERT INTO post_creation_order (post_id, sequence)
+      VALUES (NEW.id, COALESCE((SELECT MAX(sequence) FROM post_creation_order), 0) + 1);
+    END`,
+    post_creation_order_is_immutable: `CREATE TRIGGER post_creation_order_is_immutable
+      BEFORE UPDATE OF post_id, sequence ON post_creation_order BEGIN
+      SELECT RAISE(ABORT, 'post creation order is immutable'); END`,
+    feed_traversal_is_immutable: `CREATE TRIGGER feed_traversal_is_immutable
+      BEFORE UPDATE OF id, kind, community_name, principal_id, created_at, expires_at ON feed_traversals BEGIN
+      SELECT RAISE(ABORT, 'feed traversal is immutable'); END`,
+    feed_traversal_item_is_immutable: `CREATE TRIGGER feed_traversal_item_is_immutable
+      BEFORE UPDATE OF traversal_id, ordinal, post_id, score ON feed_traversal_items BEGIN
+      SELECT RAISE(ABORT, 'feed traversal item is immutable'); END`,
+    feed_page_token_is_immutable: `CREATE TRIGGER feed_page_token_is_immutable
+      BEFORE UPDATE OF token, traversal_id, start_ordinal ON feed_page_tokens BEGIN
+      SELECT RAISE(ABORT, 'feed page token is immutable'); END`,
+  };
+  const triggersValid = Object.entries(expectedTriggers).every(([name, sql]) =>
+    schemaSql(database, name) === normalizeSchemaSql(sql));
+  const indexesValid = hasExactIndex(database, "feed_traversal_items_post_id", "feed_traversal_items", ["post_id"])
+    && hasExactIndex(database, "feed_page_tokens_traversal_offset", "feed_page_tokens", ["traversal_id", "start_ordinal"]);
+  const itemForeignKeys = /** @type {{table: string}[]} */ (
+    database.prepare("PRAGMA foreign_key_list(feed_traversal_items)").all());
+  const foreignKeysValid = hasCascade(database, "post_creation_order", "posts", "post_id", "id")
+    && hasCascade(database, "feed_traversal_items", "feed_traversals", "traversal_id", "id")
+    && hasCascade(database, "feed_page_tokens", "feed_traversals", "traversal_id", "id")
+    && !itemForeignKeys.some((key) => key.table === "posts");
+  const invalid = database.prepare(`SELECT 1 FROM posts AS post
+    LEFT JOIN post_creation_order AS ordered ON ordered.post_id = post.id
+    WHERE ordered.post_id IS NULL
+    UNION ALL
+    SELECT 1 FROM post_creation_order WHERE sequence <= 0
+    UNION ALL
+    SELECT 1 FROM feed_traversals
+    WHERE (kind = 'community' AND community_name IS NULL) OR (kind IN ('home', 'popular') AND community_name IS NOT NULL) OR expires_at <= created_at
+    UNION ALL
+    SELECT 1 FROM feed_traversal_items AS item
+    LEFT JOIN feed_traversals AS traversal ON traversal.id = item.traversal_id
+    WHERE traversal.id IS NULL OR item.ordinal < 0 OR typeof(item.score) <> 'integer'
+    UNION ALL
+    SELECT 1 FROM feed_page_tokens AS token
+    LEFT JOIN feed_traversals AS traversal ON traversal.id = token.traversal_id
+    WHERE traversal.id IS NULL OR token.start_ordinal < 0
+    LIMIT 1`).get();
+  if (!tablesValid || !columnsValid || !triggersValid || !indexesValid || !foreignKeysValid || invalid) {
+    throw new Error("feed invariant is invalid");
+  }
+}
+
 /** @param {Database} database */
 function assertCommentInvariant(database) {
   const triggerCount = database.prepare(`SELECT COUNT(*) AS count FROM sqlite_schema
@@ -131,7 +262,7 @@ export function openDatabase(path) {
   try {
     database.exec("PRAGMA foreign_keys = ON; BEGIN IMMEDIATE");
     const version = /** @type {{user_version: number}} */ (database.prepare("PRAGMA user_version").get()).user_version;
-    if (version > 6) throw new Error("Unsupported database schema version");
+    if (version > 7) throw new Error("Unsupported database schema version");
     if (version === 0) {
       database.exec(baselineMigration);
       database.exec("PRAGMA user_version = 1");
@@ -156,10 +287,15 @@ export function openDatabase(path) {
       database.exec(voteMigration);
       database.exec("PRAGMA user_version = 6");
     }
+    if (version <= 6) {
+      database.exec(feedMigration);
+      database.exec("PRAGMA user_version = 7");
+    }
     assertCommunityOwnerInvariant(database);
     assertPostInvariant(database);
     assertCommentInvariant(database);
     assertVoteInvariant(database);
+    assertFeedInvariant(database);
     database.exec("COMMIT");
     return database;
   } catch (error) {
