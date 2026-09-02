@@ -26,6 +26,7 @@ const postMigration = migration("004-posts.sql");
 const commentMigration = migration("005-comments.sql");
 const voteMigration = migration("006-votes.sql");
 const personalMigration = migration("006-personal-state.sql");
+const feedMigration = migration("007-feeds.sql");
 
 /** @param {Database} database */
 function assertCommunityOwnerInvariant(database) {
@@ -147,6 +148,48 @@ function assertPersonalInvariant(database) {
 }
 
 /** @param {Database} database */
+function assertFeedInvariant(database) {
+  const published = database.prepare("PRAGMA table_info(posts)").all().find((/** @type {any} */ column) => column.name === "published_at");
+  const expectedColumns = {
+    feed_traversals: [["id", "TEXT", 1, 1], ["feed_kind", "TEXT", 1, 0], ["community_name", "TEXT", 0, 0], ["requester_user_id", "TEXT", 0, 0], ["created_at", "INTEGER", 1, 0], ["expires_at", "INTEGER", 1, 0]],
+    feed_traversal_items: [["traversal_id", "TEXT", 1, 1], ["ordinal", "INTEGER", 1, 2], ["post_id", "TEXT", 1, 0]],
+    feed_page_tokens: [["token", "TEXT", 1, 1], ["traversal_id", "TEXT", 1, 0], ["start_ordinal", "INTEGER", 1, 0]],
+  };
+  /** @param {string} table @param {any[][]} expected */
+  const columnsMatch = (table, expected) => JSON.stringify(database.prepare(`PRAGMA table_info(${table})`).all().map((/** @type {any} */ column) => [column.name, column.type, column.notnull, column.pk])) === JSON.stringify(expected);
+  /** @param {string} table @param {string} name @param {[string, number][]} columns */
+  const hasIndex = (table, name, columns) => {
+    const index = database.prepare(`PRAGMA index_list(${table})`).all().find((/** @type {any} */ entry) => entry.name === name);
+    return Boolean(index) && JSON.stringify(database.prepare("SELECT name, desc FROM pragma_index_xinfo(?) WHERE key = 1 ORDER BY seqno").all(name).map((/** @type {any} */ part) => [part.name, part.desc])) === JSON.stringify(columns);
+  };
+  const expectedTriggers = {
+    posts_published_at_is_immutable: "create trigger posts_published_at_is_immutable before update of published_at on posts begin select raise(abort, 'post publication time is immutable'); end",
+    feed_traversals_are_immutable: "create trigger feed_traversals_are_immutable before update on feed_traversals begin select raise(abort, 'feed traversal is immutable'); end",
+    feed_traversal_items_are_immutable: "create trigger feed_traversal_items_are_immutable before update on feed_traversal_items begin select raise(abort, 'feed traversal item is immutable'); end",
+    feed_page_tokens_are_immutable: "create trigger feed_page_tokens_are_immutable before update on feed_page_tokens begin select raise(abort, 'feed page token is immutable'); end",
+  };
+  const immutable = Object.entries(expectedTriggers).every(([name, expected]) => normalizedSql(database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = ?").get(name)?.sql || "") === normalizedSql(expected));
+  const feedSql = normalizedSql(database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'feed_traversals'").get()?.sql || "");
+  const itemForeignKeys = database.prepare("PRAGMA foreign_key_list(feed_traversal_items)").all();
+  const tokenForeignKeys = database.prepare("PRAGMA foreign_key_list(feed_page_tokens)").all();
+  /** @param {string} table @param {string[]} columns */
+  const hasUnique = (table, columns) => database.prepare(`PRAGMA index_list(${table})`).all().some((/** @type {any} */ index) => index.unique === 1 && JSON.stringify(database.prepare("SELECT name FROM pragma_index_info(?) ORDER BY seqno").all(index.name).map((/** @type {any} */ part) => part.name)) === JSON.stringify(columns));
+  const invalid = database.prepare(`SELECT 1 FROM posts WHERE typeof(published_at) <> 'integer' OR published_at < 0
+    UNION ALL SELECT 1 FROM feed_traversals WHERE feed_kind NOT IN ('home', 'popular', 'community') OR typeof(created_at) <> 'integer' OR created_at < 0 OR typeof(expires_at) <> 'integer' OR expires_at <= created_at
+    UNION ALL SELECT 1 FROM feed_traversal_items WHERE typeof(ordinal) <> 'integer' OR ordinal < 0
+    UNION ALL SELECT 1 FROM feed_page_tokens WHERE typeof(start_ordinal) <> 'integer' OR start_ordinal < 0 LIMIT 1`).get();
+  if (published?.type !== "INTEGER" || published.notnull !== 1 || !Object.entries(expectedColumns).every(([table, columns]) => columnsMatch(table, columns)) ||
+    !hasIndex("posts", "posts_feed_publication", [["published_at", 1], ["id", 0]]) ||
+    !hasIndex("posts", "posts_feed_community_publication", [["community_name", 0], ["published_at", 1], ["id", 0]]) ||
+    !hasIndex("community_memberships", "community_memberships_feed_user", [["user_id", 0], ["community_name", 0]]) ||
+    !feedSql.includes("check (feed_kind in ('home', 'popular', 'community'))") || !feedSql.includes("feed_kind = 'home' and requester_user_id is not null and community_name is null") ||
+    !hasUnique("feed_traversal_items", ["traversal_id", "post_id"]) || !hasUnique("feed_page_tokens", ["traversal_id", "start_ordinal"]) ||
+    itemForeignKeys.length !== 1 || itemForeignKeys[0].table !== "feed_traversals" || itemForeignKeys[0].from !== "traversal_id" || itemForeignKeys[0].on_delete !== "CASCADE" ||
+    tokenForeignKeys.length !== 1 || tokenForeignKeys[0].table !== "feed_traversals" || tokenForeignKeys[0].from !== "traversal_id" || tokenForeignKeys[0].on_delete !== "CASCADE" ||
+    !immutable || invalid || database.prepare("PRAGMA foreign_key_check").get()) throw new Error("feed invariant is invalid");
+}
+
+/** @param {Database} database */
 function assertVoteInvariant(database) {
   const voteColumns = /** @type {{name: string, type: string, notnull: number, pk: number}[]} */ (database.prepare("PRAGMA table_info(post_votes)").all());
   const expectedColumns = [
@@ -214,7 +257,7 @@ export function openDatabase(path) {
   try {
     database.exec("PRAGMA foreign_keys = ON; BEGIN IMMEDIATE");
     const version = /** @type {{user_version: number}} */ (database.prepare("PRAGMA user_version").get()).user_version;
-    if (version > 7) throw new Error("Unsupported database schema version");
+    if (version > 8) throw new Error("Unsupported database schema version");
     if (version === 0) {
       database.exec(baselineMigration);
       database.exec("PRAGMA user_version = 1");
@@ -249,11 +292,16 @@ export function openDatabase(path) {
       else if (!voteSchemaPresent || personalTableCount !== 6) throw new Error("Ambiguous version 6 database schema");
       database.exec("PRAGMA user_version = 7");
     }
+    if (version <= 7) {
+      database.exec(feedMigration);
+      database.exec("PRAGMA user_version = 8");
+    }
     assertCommunityOwnerInvariant(database);
     assertPostInvariant(database);
     assertCommentInvariant(database);
     assertVoteInvariant(database);
     assertPersonalInvariant(database);
+    assertFeedInvariant(database);
     database.exec("COMMIT");
     return database;
   } catch (error) {

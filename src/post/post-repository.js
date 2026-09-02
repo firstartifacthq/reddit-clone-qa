@@ -13,8 +13,8 @@ export class PostRepository {
     this.postById = database.prepare(`SELECT posts.*, users.username FROM posts JOIN users ON users.id = posts.author_user_id WHERE posts.id = ?`);
     this.mediaById = database.prepare("SELECT media_content_type, media_bytes FROM posts WHERE id = ? AND type = 'media'");
     this.idempotencyByKey = database.prepare("SELECT body_digest, response_json FROM post_idempotency WHERE author_user_id = ? AND community_name = ? AND idempotency_key = ?");
-    this.insertPost = database.prepare(`INSERT INTO posts (id, community_name, author_user_id, type, title, text_content, url_content, media_filename, media_content_type, media_bytes)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    this.insertPost = database.prepare(`INSERT INTO posts (id, community_name, author_user_id, type, title, text_content, url_content, media_filename, media_content_type, media_bytes, published_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     this.insertIdempotency = database.prepare(`INSERT INTO post_idempotency (author_user_id, community_name, idempotency_key, body_digest, post_id, response_json)
       VALUES (?, ?, ?, ?, ?, ?)`);
     this.updateText = database.prepare("UPDATE posts SET title = COALESCE(?, title), text_content = COALESCE(?, text_content) WHERE id = ? AND author_user_id = ? RETURNING *");
@@ -33,10 +33,10 @@ export class PostRepository {
   findMedia(id) { return this.mediaById.get(id); }
   /** @param {string} userId @param {string} community @param {string} key */
   findIdempotency(userId, community, key) { return this.idempotencyByKey.get(userId, community, key); }
-  /** @param {{id: string, community: string, authorId: string, type: string, title: string, text?: string, url?: string, media?: {filename: string, contentType: string, bytes: Uint8Array}}} post */
+  /** @param {{id: string, community: string, authorId: string, type: string, title: string, text?: string, url?: string, media?: {filename: string, contentType: string, bytes: Uint8Array}, publishedAt: number}} post */
   createPost(post) {
     this.insertPost.run(post.id, post.community, post.authorId, post.type, post.title, post.text ?? null, post.url ?? null,
-      post.media?.filename ?? null, post.media?.contentType ?? null, post.media?.bytes ?? null);
+      post.media?.filename ?? null, post.media?.contentType ?? null, post.media?.bytes ?? null, post.publishedAt);
   }
   /** @param {{authorId: string, community: string, key: string, digest: string, postId: string, snapshot: string}} entry */
   createIdempotency(entry) { this.insertIdempotency.run(entry.authorId, entry.community, entry.key, entry.digest, entry.postId, entry.snapshot); }
