@@ -19,6 +19,9 @@ import { parseVoteJson, validateVote } from "./vote/vote-validation.js";
 import { SearchRepository } from "./search/search-repository.js";
 import { SearchService } from "./search/search-service.js";
 import { validateSearch } from "./search/search-validation.js";
+import { ModerationRepository } from "./moderation/moderation-repository.js";
+import { ModerationService } from "./moderation/moderation-service.js";
+import { validateModerationPage } from "./moderation/moderation-validation.js";
 import { validateCommentPage } from "./comment/comment-validation.js";
 import { canonicalCommunityName } from "./community/community-validation.js";
 import { normalizeUsername } from "./account/username.js";
@@ -27,12 +30,13 @@ import {
   invalidRequestError, notFoundError, profileUnavailableError, invalidPostError, postConflictError, postUnavailableError,
   invalidCommentError, invalidCommentPageError, commentUnavailableError,
   invalidPersonalPageError, invalidPreferencesError, personalUnavailableError, invalidVoteError, voteUnavailableError,
-  invalidSearchError, searchUnavailableError,
+  invalidSearchError, searchUnavailableError, invalidReportError, duplicateReportError,
+  invalidModerationPageError, moderationUnavailableError, methodNotAllowedError,
 } from "./http-errors.js";
 import { renderShell } from "./public-shell.js";
 
 /** @typedef {{exec: (sql: string) => void, prepare: (sql: string) => any, close: () => void}} Database */
-/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string, beforeMediaPersist?: () => void, beforeCommentPersist?: () => void, beforeSavedPersist?: () => void, beforeHistoryPersist?: () => void, beforePreferencePersist?: () => void, beforeVotePersist?: () => void, beforeSearchRead?: () => void}} AppOptions */
+/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string, beforeMediaPersist?: () => void, beforeCommentPersist?: () => void, beforeSavedPersist?: () => void, beforeHistoryPersist?: () => void, beforePreferencePersist?: () => void, beforeVotePersist?: () => void, beforeSearchRead?: () => void, beforeModerationPersist?: () => void}} AppOptions */
 /** @typedef {Record<string, string | string[] | undefined>} RequestHeaders */
 /** @typedef {{method?: string, path?: string, headers?: RequestHeaders, payload?: string | Uint8Array}} AppRequest */
 /** @typedef {{status: number, headers: Record<string, string>, body: string | Uint8Array}} AppResponse */
@@ -115,6 +119,12 @@ function commentPath(pathname) {
   if (!match) return undefined;
   try { return decodeURIComponent(match[1]); } catch { return undefined; }
 }
+/** @param {string} pathname @param {string} expression */
+function moderationId(pathname, expression) {
+  const match = new RegExp(expression).exec(pathname);
+  if (!match) return undefined;
+  try { return decodeURIComponent(match[1]); } catch { return undefined; }
+}
 /** @param {string | undefined} contentType */
 function isJsonContentType(contentType) { return typeof contentType === "string" && contentType.split(";", 1)[0].trim().toLowerCase() === "application/json"; }
 
@@ -122,7 +132,7 @@ function isJsonContentType(contentType) { return typeof contentType === "string"
 export function createApp(options = {}) {
   const {
     database: injectedDatabase, now, randomToken, beforeMediaPersist, beforeCommentPersist,
-    beforeSavedPersist, beforeHistoryPersist, beforePreferencePersist, beforeVotePersist, beforeSearchRead, ...configOptions
+    beforeSavedPersist, beforeHistoryPersist, beforePreferencePersist, beforeVotePersist, beforeSearchRead, beforeModerationPersist, ...configOptions
   } = options;
   const config = createConfig(configOptions);
   const database = injectedDatabase || openDatabase(config.databasePath);
@@ -134,6 +144,7 @@ export function createApp(options = {}) {
   const personalRepository = new PersonalRepository(database);
   const voteRepository = new VoteRepository(database);
   const searchRepository = new SearchRepository(database);
+  const moderationRepository = new ModerationRepository(database);
   const auth = new AuthService({ repository: authRepository, database, config, now, randomToken });
   const profiles = new ProfileService({ repository: profileRepository, database, now });
   const communities = new CommunityService({ repository: communityRepository, database, now });
@@ -142,6 +153,7 @@ export function createApp(options = {}) {
   const personal = new PersonalService({ repository: personalRepository, database, now, beforeSavedPersist, beforeHistoryPersist, beforePreferencePersist });
   const votes = new VoteService({ repository: voteRepository, database, beforeVotePersist });
   const search = new SearchService({ repository: searchRepository, beforeSearchRead });
+  const moderation = new ModerationService({ repository: moderationRepository, database, now, beforeModerationPersist });
   const ownDatabase = !injectedDatabase;
 
   /** @param {string} token @param {number} maxAgeSeconds */
@@ -291,14 +303,61 @@ export function createApp(options = {}) {
         if (result.kind === "not-found") return json(404, notFoundError);
         return json(503, { error: "Community service unavailable" });
       }
+      const reportPostId = moderationId(url.pathname, "^/api/posts/([^/]+)/reports$");
+      if (reportPostId && method === "POST") {
+        if (!account) return json(401, authenticationError);
+        const admission = moderation.reportAdmission(account.id, reportPostId);
+        if (admission === "not-found") return json(404, notFoundError);
+        if (admission === "forbidden") return json(403, forbiddenError);
+        if (!isJsonContentType(headers["content-type"])) return json(422, invalidReportError);
+        const result = moderation.report(account.id, reportPostId, request.payload);
+        if (result.kind === "success") return json(201, result.report);
+        if (result.kind === "duplicate") return json(409, duplicateReportError);
+        if (result.kind === "not-found") return json(404, notFoundError);
+        if (result.kind === "forbidden") return json(403, forbiddenError);
+        if (result.kind === "invalid") return json(422, invalidReportError);
+        return json(503, moderationUnavailableError);
+      }
+      if (url.pathname === "/api/mod/queue" && method === "GET") {
+        if (!account) return json(401, authenticationError);
+        const authorities = moderation.authorities(account.id);
+        if (!authorities.length) return json(403, forbiddenError);
+        const page = validateModerationPage(url.searchParams);
+        if (!page) return json(422, invalidModerationPageError);
+        const result = moderation.queue(account.id, page.limit, page.cursor);
+        if (result.kind === "success") return json(200, { reports: result.reports, nextCursor: result.nextCursor });
+        if (result.kind === "forbidden") return json(403, forbiddenError);
+        if (result.kind === "invalid-page") return json(422, invalidModerationPageError);
+        return json(503, moderationUnavailableError);
+      }
+      const moderatedPostId = moderationId(url.pathname, "^/api/mod/posts/([^/]+)$");
+      const restorePostId = moderationId(url.pathname, "^/api/mod/posts/([^/]+)/restore$");
+      const moderationTargetId = moderatedPostId ?? restorePostId;
+      if (moderationTargetId && ((moderatedPostId && method === "DELETE") || (restorePostId && method === "POST"))) {
+        if (!account) return json(401, authenticationError);
+        const result = moderation.transition(account.id, account.username, moderationTargetId, moderatedPostId ? "remove" : "restore");
+        if (result.kind === "success") return empty(moderatedPostId ? 204 : 200);
+        if (result.kind === "not-found") return json(404, notFoundError);
+        if (result.kind === "forbidden") return json(403, forbiddenError);
+        return json(503, moderationUnavailableError);
+      }
+      const auditEventId = moderationId(url.pathname, "^/api/mod/audit/([^/]+)$");
+      if (auditEventId && (method === "GET" || method === "PATCH" || method === "DELETE")) {
+        if (!account) return json(401, authenticationError);
+        const result = moderation.audit(account.id, auditEventId);
+        if (result.kind === "forbidden") return json(403, forbiddenError);
+        if (result.kind === "not-found") return json(404, notFoundError);
+        if (method !== "GET") return json(405, methodNotAllowedError, { allow: "GET" });
+        return json(200, result.event);
+      }
       const modlogCommunity = communityPath(url.pathname, "/modlog");
       if (method === "GET" && modlogCommunity !== null) {
         if (!account) return json(401, authenticationError);
         if (!modlogCommunity) return json(404, notFoundError);
-        const result = communities.admitModlog(account.id, modlogCommunity);
+        const result = moderation.modlog(account.id, modlogCommunity);
         if (result.kind === "not-found") return json(404, notFoundError);
         if (result.kind === "forbidden") return json(403, forbiddenError);
-        return json(200, { entries: [] });
+        return json(200, { entries: result.entries });
       }
       const postCommunity = communityPath(url.pathname, "/posts");
       if (method === "POST" && postCommunity !== null) {

@@ -4,7 +4,7 @@ export class PersonalRepository {
   /** @param {Database} database */
   constructor(database) {
     this.activeUser = database.prepare("SELECT 1 FROM users WHERE id = ? AND deletion_requested_at IS NULL");
-    this.post = database.prepare(`SELECT posts.*, users.username FROM posts JOIN users ON users.id = posts.author_user_id
+    this.post = database.prepare(`SELECT posts.*, users.username FROM readable_posts AS posts JOIN users ON users.id = posts.author_user_id
       WHERE posts.id = ?`);
     this.insertSaved = database.prepare("INSERT OR IGNORE INTO saved_posts (user_id, post_id, saved_at) VALUES (?, ?, ?)");
     this.deleteSaved = database.prepare("DELETE FROM saved_posts WHERE user_id = ? AND post_id = ?");
@@ -22,15 +22,18 @@ export class PersonalRepository {
     this.reusableTraversal = database.prepare(`SELECT id FROM personal_traversals
       WHERE user_id = ? AND listing_kind = ? AND snapshot_key = ? AND expires_at > ?`);
     this.insertItem = database.prepare("INSERT INTO personal_traversal_items (traversal_id, ordinal, post_id, event_at) VALUES (?, ?, ?, ?)");
-    this.savedRows = database.prepare("SELECT post_id, saved_at FROM saved_posts WHERE user_id = ? ORDER BY saved_at DESC, post_id ASC");
-    this.historyRows = database.prepare("SELECT post_id, viewed_at FROM post_history WHERE user_id = ? AND viewed_at >= ? ORDER BY viewed_at DESC, post_id ASC");
+    this.savedRows = database.prepare(`SELECT saved.post_id, saved.saved_at FROM saved_posts AS saved
+      JOIN readable_posts AS posts ON posts.id = saved.post_id WHERE saved.user_id = ? ORDER BY saved.saved_at DESC, saved.post_id ASC`);
+    this.historyRows = database.prepare(`SELECT history.post_id, history.viewed_at FROM post_history AS history
+      JOIN readable_posts AS posts ON posts.id = history.post_id WHERE history.user_id = ? AND history.viewed_at >= ? ORDER BY history.viewed_at DESC, history.post_id ASC`);
     this.token = database.prepare(`SELECT token.traversal_id, token.start_ordinal FROM personal_page_tokens AS token
       JOIN personal_traversals AS traversal ON traversal.id = token.traversal_id
       WHERE token.token = ? AND traversal.user_id = ? AND traversal.listing_kind = ? AND traversal.expires_at > ?`);
     this.page = database.prepare(`SELECT item.ordinal, item.event_at, posts.*, users.username FROM personal_traversal_items AS item
-      JOIN posts ON posts.id = item.post_id JOIN users ON users.id = posts.author_user_id
+      JOIN readable_posts AS posts ON posts.id = item.post_id JOIN users ON users.id = posts.author_user_id
       WHERE item.traversal_id = ? AND item.ordinal >= ? ORDER BY item.ordinal LIMIT ?`);
-    this.more = database.prepare("SELECT 1 FROM personal_traversal_items WHERE traversal_id = ? AND ordinal >= ? LIMIT 1");
+    this.more = database.prepare(`SELECT 1 FROM personal_traversal_items AS item
+      JOIN readable_posts AS posts ON posts.id = item.post_id WHERE item.traversal_id = ? AND item.ordinal >= ? LIMIT 1`);
     this.insertToken = database.prepare("INSERT OR IGNORE INTO personal_page_tokens (token, traversal_id, start_ordinal) VALUES (?, ?, ?)");
     this.tokenForStart = database.prepare("SELECT token FROM personal_page_tokens WHERE traversal_id = ? AND start_ordinal = ?");
   }
