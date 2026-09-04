@@ -17,7 +17,7 @@ Optional non-secret configuration is captured when the application starts:
 - `SESSION_COOKIE_NAME` (default `reddit_session`)
 - `NODE_ENV=production` enables the cookie `Secure` attribute
 - `POST_RATE_LIMIT_MAX` (default `100` valid creations)
-- `POST_RATE_LIMIT_WINDOW_MS` (default `60000` milliseconds)
+- `POST_RATE_LIMIT_WINDOW_MS` (default `60000`, accepted range `1` through `2592000000` milliseconds; creation facts are retained for that 30-day maximum)
 
 ## HTTP surface
 

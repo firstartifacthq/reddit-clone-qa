@@ -1,3 +1,5 @@
+export const POST_RATE_LIMIT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
+
 /**
  * @typedef {object} Config
  * @property {string} databasePath
@@ -44,8 +46,8 @@ export function createConfig(overrides = {}) {
   if (!Number.isSafeInteger(config.postRateLimitMax) || config.postRateLimitMax < 1) {
     throw new TypeError("postRateLimitMax must be a positive safe integer");
   }
-  if (!Number.isSafeInteger(config.postRateLimitWindowMs) || config.postRateLimitWindowMs < 1) {
-    throw new TypeError("postRateLimitWindowMs must be a positive safe integer");
+  if (!Number.isSafeInteger(config.postRateLimitWindowMs) || config.postRateLimitWindowMs < 1 || config.postRateLimitWindowMs > POST_RATE_LIMIT_RETENTION_MS) {
+    throw new TypeError(`postRateLimitWindowMs must be an integer from 1 to ${POST_RATE_LIMIT_RETENTION_MS}`);
   }
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(config.cookieName)) {
     throw new TypeError("cookieName must be a cookie-safe name");

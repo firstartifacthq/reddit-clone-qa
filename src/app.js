@@ -1,5 +1,5 @@
 import { openDatabase } from "./database.js";
-import { createConfig } from "./config.js";
+import { createConfig, POST_RATE_LIMIT_RETENTION_MS } from "./config.js";
 import { AuthRepository } from "./auth/auth-repository.js";
 import { AuthService } from "./auth/auth-service.js";
 import { ProfileRepository } from "./profile/profile-repository.js";
@@ -167,7 +167,7 @@ export function createApp(options = {}) {
   const auth = new AuthService({ repository: authRepository, database, config, now, randomToken });
   const profiles = new ProfileService({ repository: profileRepository, database, now });
   const communities = new CommunityService({ repository: communityRepository, database, now });
-  const safety = new SafetyService({ repository: safetyRepository, database, now, postRateLimitMax: config.postRateLimitMax, postRateLimitWindowMs: config.postRateLimitWindowMs, beforePostEnforcement });
+  const safety = new SafetyService({ repository: safetyRepository, database, now, postRateLimitMax: config.postRateLimitMax, postRateLimitWindowMs: config.postRateLimitWindowMs, postRateLimitRetentionMs: POST_RATE_LIMIT_RETENTION_MS, beforePostEnforcement });
   const posts = new PostService({ repository: postRepository, safety, database, now, beforeMediaPersist });
   const comments = new CommentService({ repository: commentRepository, database, beforeCommentPersist });
   const personal = new PersonalService({ repository: personalRepository, database, now, beforeSavedPersist, beforeHistoryPersist, beforePreferencePersist });

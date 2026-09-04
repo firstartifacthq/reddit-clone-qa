@@ -3,6 +3,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { postRepresentation } from "./post-representation.js";
 import { validateIdempotencyKey, validatePostCreate, validatePostPatch } from "./post-validation.js";
 
+// Seven MiB admits the documented 5 MiB canonical-base64 media envelope plus maximal metadata.
+export const POST_BODY_LIMIT_BYTES = 7 * 1_024 * 1_024;
+
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
 
 /** @param {{exec: (sql: string) => void}} database */
@@ -13,7 +16,12 @@ function rawBytes(body) {
   return typeof body === "string" ? Buffer.from(body) : body instanceof Uint8Array ? body : new Uint8Array();
 }
 /** @param {string | Uint8Array | undefined} body */
-function parseBody(body) { try { return JSON.parse(strictUtf8.decode(rawBytes(body))); } catch { return undefined; } }
+function parseBody(body) {
+  const bytes = rawBytes(body);
+  if (bytes.length > POST_BODY_LIMIT_BYTES) return { kind: "too-large" };
+  try { return { kind: "parsed", value: JSON.parse(strictUtf8.decode(bytes)) }; }
+  catch { return { kind: "invalid" }; }
+}
 /** @param {string | Uint8Array | undefined} body */
 function bodyDigest(body) { return createHash("sha256").update(rawBytes(body)).digest("hex"); }
 
@@ -34,7 +42,9 @@ export class PostService {
     if (!this.repository.isPostingMember(community, userId)) return { kind: "forbidden" };
     const key = suppliedKey === undefined ? undefined : validateIdempotencyKey(suppliedKey);
     if (suppliedKey !== undefined && !key) return { kind: "invalid" };
-    const validation = validatePostCreate(parseBody(rawBody));
+    const parsed = parseBody(rawBody);
+    if (parsed.kind === "too-large") return { kind: "too-large" };
+    const validation = validatePostCreate(parsed.kind === "parsed" ? parsed.value : undefined);
     if (validation.kind !== "valid") return validation.kind === "too-large" ? { kind: "too-large" } : { kind: "invalid" };
     const digest = bodyDigest(rawBody);
     try {
@@ -90,7 +100,9 @@ export class PostService {
     const current = this.repository.findPost(id);
     if (!current) return { kind: "not-found" };
     if (current.author_user_id !== userId) return { kind: "forbidden" };
-    const validation = validatePostPatch(current.type, parseBody(rawBody));
+    const parsed = parseBody(rawBody);
+    if (parsed.kind === "too-large") return { kind: "too-large" };
+    const validation = validatePostPatch(current.type, parsed.kind === "parsed" ? parsed.value : undefined);
     if (validation.kind !== "valid") return validation.kind === "too-large" ? { kind: "too-large" } : { kind: "invalid" };
     const valid = /** @type {{patch: {title?: string, text?: string, url?: string, media?: {filename: string, contentType: string, bytes: Uint8Array}}}} */ (validation);
     try {
