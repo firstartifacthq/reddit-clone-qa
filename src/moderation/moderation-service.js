@@ -15,9 +15,9 @@ function isDuplicateReport(error) {
 }
 
 export class ModerationService {
-  /** @param {{repository: import("./moderation-repository.js").ModerationRepository, database: {exec: (sql: string) => void}, now?: () => number, randomToken?: () => string, beforeModerationCommit?: () => void}} options */
-  constructor({ repository, database, now = Date.now, randomToken = randomUUID, beforeModerationCommit = () => {} }) {
-    this.repository = repository; this.database = database; this.now = now; this.randomToken = randomToken; this.beforeModerationCommit = beforeModerationCommit;
+  /** @param {{repository: import("./moderation-repository.js").ModerationRepository, notificationService?: import("../notification/notification-service.js").NotificationService, database: {exec: (sql: string) => void}, now?: () => number, randomToken?: () => string, beforeModerationCommit?: () => void}} options */
+  constructor({ repository, notificationService, database, now = Date.now, randomToken = randomUUID, beforeModerationCommit = () => {} }) {
+    this.repository = repository; this.notifications = notificationService; this.database = database; this.now = now; this.randomToken = randomToken; this.beforeModerationCommit = beforeModerationCommit;
   }
   /** @param {string} userId @param {string} postId */
   report(userId, postId) {
@@ -73,7 +73,8 @@ export class ModerationService {
       if (isChange) {
         const changed = transition === "remove" ? this.repository.markRemoved(postId) : this.repository.markRestored(postId);
         if (changed !== 1) { rollback(this.database); return { kind: "unavailable" }; }
-        this.repository.appendAudit({ id: randomUUID(), postId, community: post.community_name, moderatorId: userId, action: transition === "remove" ? "removed" : "restored", occurredAt: this.now() });
+        const auditId = this.repository.appendAudit({ id: randomUUID(), postId, community: post.community_name, moderatorId: userId, action: transition === "remove" ? "removed" : "restored", occurredAt: this.now() });
+        if (transition === "remove") this.notifications?.recordModerationEvent(post.author_user_id, userId, postId, auditId);
         this.beforeModerationCommit();
       }
       const restored = transition === "restore" ? this.repository.readablePostRepresentation(postId) : undefined;

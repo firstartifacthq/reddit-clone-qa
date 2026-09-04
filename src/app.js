@@ -25,6 +25,9 @@ import { validateFeedPage } from "./feed/feed-validation.js";
 import { ModerationRepository } from "./moderation/moderation-repository.js";
 import { ModerationService } from "./moderation/moderation-service.js";
 import { validateModerationQueuePage } from "./moderation/moderation-validation.js";
+import { NotificationRepository } from "./notification/notification-repository.js";
+import { NotificationService } from "./notification/notification-service.js";
+import { validateDeliveryRetry, validateNotificationPage, validateNotificationPatch } from "./notification/notification-validation.js";
 import { validateCommentPage } from "./comment/comment-validation.js";
 import { canonicalCommunityName } from "./community/community-validation.js";
 import { normalizeUsername } from "./account/username.js";
@@ -35,6 +38,7 @@ import {
   invalidPersonalPageError, invalidPreferencesError, personalUnavailableError, invalidVoteError, voteUnavailableError,
   invalidSearchError, searchUnavailableError, invalidFeedPageError, feedUnavailableError,
   invalidModerationQueuePageError, moderationUnavailableError, methodNotAllowedError,
+  invalidNotificationPageError, invalidNotificationError, notificationUnavailableError, notificationNotFoundError,
 } from "./http-errors.js";
 import { renderShell } from "./public-shell.js";
 
@@ -91,6 +95,10 @@ function publicUsername(pathname) {
 }
 /** @param {string} pathname */
 function privateUserSuffix(pathname) { return /^\/api\/users\/[^/]+\/(saved|history)$/.test(pathname); }
+/** @param {string} pathname */
+function notificationUserSuffix(pathname) { return /^\/api\/users\/([^/]+)\/notifications$/.exec(pathname); }
+/** @param {string} pathname */
+function notificationPath(pathname) { const match = /^\/api\/me\/notifications\/([^/]+)$/.exec(pathname); if (!match) return undefined; try { return decodeURIComponent(match[1]); } catch { return undefined; } }
 // null means that this is not a community route; undefined means an invalid route name.
 /** @param {string} pathname @param {string} suffix @returns {string | undefined | null} */
 function communityPath(pathname, suffix) {
@@ -155,16 +163,19 @@ export function createApp(options = {}) {
   const searchRepository = new SearchRepository(database);
   const feedRepository = new FeedRepository(database);
   const moderationRepository = new ModerationRepository(database);
+  const notificationRepository = new NotificationRepository(database);
+  const notifications = new NotificationService({ repository: notificationRepository, database, now, randomToken });
   const auth = new AuthService({ repository: authRepository, database, config, now, randomToken });
   const profiles = new ProfileService({ repository: profileRepository, database, now });
   const communities = new CommunityService({ repository: communityRepository, database, now });
   const posts = new PostService({ repository: postRepository, database, now, beforeMediaPersist });
-  const comments = new CommentService({ repository: commentRepository, database, beforeCommentPersist });
+  const comments = new CommentService({ repository: commentRepository, notificationService: notifications, database, beforeCommentPersist });
   const personal = new PersonalService({ repository: personalRepository, database, now, beforeSavedPersist, beforeHistoryPersist, beforePreferencePersist });
-  const votes = new VoteService({ repository: voteRepository, database, beforeVotePersist });
+  const votes = new VoteService({ repository: voteRepository, notificationService: notifications, database, beforeVotePersist });
   const search = new SearchService({ repository: searchRepository, beforeSearchRead });
   const feeds = new FeedService({ repository: feedRepository, database, now, beforeFeedCommit });
-  const moderation = new ModerationService({ repository: moderationRepository, database, now, randomToken, beforeModerationCommit });
+  const moderation = new ModerationService({ repository: moderationRepository, notificationService: notifications, database, now, randomToken, beforeModerationCommit });
+  const deliveryCapability = Symbol("notification delivery capability");
   const ownDatabase = !injectedDatabase;
 
   /** @param {string} token @param {number} maxAgeSeconds */
@@ -174,8 +185,8 @@ export function createApp(options = {}) {
     return attributes.join("; ");
   }
 
-  /** @param {AppRequest} request @returns {Promise<AppResponse>} */
-  async function handle(request) {
+  /** @param {AppRequest} request @param {symbol | undefined} [capability] @returns {Promise<AppResponse>} */
+  async function handle(request, capability) {
     try {
       const method = (request.method || "GET").toUpperCase();
       const url = new URL(request.path || "/", "http://localhost");
@@ -261,6 +272,55 @@ export function createApp(options = {}) {
         if (result.kind === "success") return json(202, { status: "Deletion requested" }, { "set-cookie": `${sessionCookie("", 0)}; Expires=Thu, 01 Jan 1970 00:00:00 GMT` });
         if (result.kind === "lost-authority") return json(401, authenticationError);
         return json(503, profileUnavailableError);
+      }
+      if (method === "POST" && url.pathname === "/api/notifications/delivery/retry") {
+        // No serializable request component can create this in-process capability.
+        if (capability !== deliveryCapability) return json(403, forbiddenError);
+        const eventKey = validateDeliveryRetry(parseJson(request.payload));
+        if (!eventKey) return json(422, invalidNotificationError);
+        const result = notifications.retry(eventKey);
+        if (result.kind === "success") return empty(204);
+        if (result.kind === "not-found") return json(404, notificationNotFoundError);
+        return json(503, notificationUnavailableError);
+      }
+      if (method === "GET" && url.pathname === "/api/me/notifications") {
+        if (!account) return json(401, authenticationError);
+        const page = validateNotificationPage(url.searchParams); if (!page) return json(422, invalidNotificationPageError);
+        const result = notifications.listing(account.id, page.limit, page.cursor);
+        if (result.kind === "success") return json(200, { notifications: result.notifications, nextCursor: result.nextCursor });
+        if (result.kind === "lost-authority") return json(401, authenticationError);
+        if (result.kind === "invalid-page") return json(422, invalidNotificationPageError);
+        return json(503, notificationUnavailableError);
+      }
+      const privateNotifications = notificationUserSuffix(url.pathname);
+      if (method === "GET" && privateNotifications) {
+        if (!account) return json(401, authenticationError);
+        let target; try { target = normalizeUsername(decodeURIComponent(privateNotifications[1])); } catch { target = undefined; }
+        if (!target || target.toLowerCase() !== account.username.toLowerCase()) return json(403, forbiddenError);
+        const page = validateNotificationPage(url.searchParams); if (!page) return json(422, invalidNotificationPageError);
+        const result = notifications.listing(account.id, page.limit, page.cursor);
+        if (result.kind === "success") return json(200, { notifications: result.notifications, nextCursor: result.nextCursor });
+        if (result.kind === "lost-authority") return json(401, authenticationError);
+        if (result.kind === "invalid-page") return json(422, invalidNotificationPageError);
+        return json(503, notificationUnavailableError);
+      }
+      const notificationId = notificationPath(url.pathname);
+      if (notificationId && (method === "PATCH" || method === "DELETE")) {
+        if (!account) return json(401, authenticationError);
+        if (method === "PATCH") {
+          if (!isJsonContentType(headers["content-type"])) return json(422, invalidNotificationError);
+          const patch = validateNotificationPatch(parseJson(request.payload)); if (!patch) return json(422, invalidNotificationError);
+          const result = notifications.setRead(account.id, notificationId, patch.read);
+          if (result.kind === "success") return empty(204);
+          if (result.kind === "lost-authority") return json(401, authenticationError);
+          if (result.kind === "unavailable-target") return json(404, notificationNotFoundError);
+          return json(503, notificationUnavailableError);
+        }
+        const result = notifications.delete(account.id, notificationId);
+        if (result.kind === "success") return empty(204);
+        if (result.kind === "lost-authority") return json(401, authenticationError);
+        if (result.kind === "unavailable-target") return json(404, notificationNotFoundError);
+        return json(503, notificationUnavailableError);
       }
       if (method === "GET" && privateUserSuffix(url.pathname)) return account ? json(403, forbiddenError) : json(401, authenticationError);
       if (method === "GET" && url.pathname === "/api/me/saved") {
@@ -550,6 +610,10 @@ export function createApp(options = {}) {
         bytes: async () => new Uint8Array(bytes),
         json: async () => JSON.parse(new TextDecoder().decode(bytes)),
       };
+    },
+    /** @param {{eventKey: string}} request */
+    async retryNotificationDelivery(request) {
+      return handle({ method: "POST", path: "/api/notifications/delivery/retry", headers: { "content-type": "application/json" }, payload: JSON.stringify(request) }, deliveryCapability);
     },
     config,
     database,

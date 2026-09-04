@@ -28,6 +28,7 @@ const voteMigration = migration("006-votes.sql");
 const personalMigration = migration("006-personal-state.sql");
 const feedMigration = migration("007-feeds.sql");
 const moderationMigration = migration("008-moderation.sql");
+const notificationMigration = migration("009-notifications.sql");
 
 /** @param {Database} database */
 function assertCommunityOwnerInvariant(database) {
@@ -382,6 +383,33 @@ function assertModerationInvariant(database) {
 }
 
 /** @param {Database} database */
+function assertNotificationInvariant(database) {
+  const fail = () => { throw new Error("notification invariant is invalid"); };
+  const expected = {
+    notification_events: [["id", "TEXT", 1, 1], ["event_key", "TEXT", 1, 0], ["occurrence_sequence", "INTEGER", 1, 0], ["recipient_user_id", "TEXT", 1, 0], ["kind", "TEXT", 1, 0], ["related_item_type", "TEXT", 1, 0], ["related_item_id", "TEXT", 1, 0], ["occurred_at", "INTEGER", 1, 0]],
+    notifications: [["id", "TEXT", 1, 1], ["event_id", "TEXT", 1, 0], ["owner_user_id", "TEXT", 1, 0], ["read_state", "INTEGER", 1, 0], ["deleted_at", "INTEGER", 0, 0]],
+    notification_traversals: [["id", "TEXT", 1, 1], ["owner_user_id", "TEXT", 1, 0], ["snapshot_key", "TEXT", 1, 0], ["created_at", "INTEGER", 1, 0], ["expires_at", "INTEGER", 1, 0]],
+    notification_traversal_items: [["traversal_id", "TEXT", 1, 1], ["ordinal", "INTEGER", 1, 2], ["notification_id", "TEXT", 1, 0]],
+    notification_page_tokens: [["token", "TEXT", 1, 1], ["traversal_id", "TEXT", 1, 0], ["start_ordinal", "INTEGER", 1, 0]],
+  };
+  for (const [table, columns] of Object.entries(expected)) {
+    const actual = database.prepare(`PRAGMA table_info(${table})`).all().map((/** @type {any} */ column) => [column.name, column.type, column.notnull, column.pk]);
+    if (JSON.stringify(actual) !== JSON.stringify(columns)) fail();
+  }
+  /** @param {string} name */
+  const sql = (name) => normalizedSql(database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?").get(name)?.sql || "");
+  if (!sql("notification_events").includes("check (kind in ('reply', 'mention', 'vote', 'moderation'))") ||
+    !sql("notification_events").includes("check (related_item_type in ('comment', 'post'))") ||
+    !sql("notifications").includes("check (typeof(read_state) = 'integer' and read_state in (0, 1))")) fail();
+  const names = ["notification_events_are_immutable", "notification_events_cannot_be_deleted", "notifications_owner_matches_event", "notifications_owner_is_immutable", "notifications_cannot_be_hard_deleted", "notifications_deletion_is_one_way", "notification_traversals_are_immutable", "notification_traversal_items_are_immutable", "notification_page_tokens_are_immutable"];
+  if (database.prepare(`SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'trigger' AND name IN (${names.map(() => "?").join(",")})`).get(...names).count !== names.length) fail();
+  const invalid = database.prepare(`SELECT 1 FROM notification_events WHERE occurrence_sequence < 1 OR kind NOT IN ('reply','mention','vote','moderation') OR related_item_type NOT IN ('comment','post') OR occurred_at < 0
+    UNION ALL SELECT 1 FROM notifications WHERE read_state NOT IN (0,1) OR (deleted_at IS NOT NULL AND deleted_at < 0)
+    UNION ALL SELECT 1 FROM notification_traversals WHERE expires_at <= created_at LIMIT 1`).get();
+  if (invalid || database.prepare("PRAGMA foreign_key_check").get()) fail();
+}
+
+/** @param {Database} database */
 function assertVoteInvariant(database) {
   const voteColumns = /** @type {{name: string, type: string, notnull: number, pk: number}[]} */ (database.prepare("PRAGMA table_info(post_votes)").all());
   const expectedColumns = [
@@ -449,7 +477,7 @@ export function openDatabase(path) {
   try {
     database.exec("PRAGMA foreign_keys = ON; BEGIN IMMEDIATE");
     const version = /** @type {{user_version: number}} */ (database.prepare("PRAGMA user_version").get()).user_version;
-    if (version > 9) throw new Error("Unsupported database schema version");
+    if (version > 10) throw new Error("Unsupported database schema version");
     if (version === 0) {
       database.exec(baselineMigration);
       database.exec("PRAGMA user_version = 1");
@@ -492,6 +520,10 @@ export function openDatabase(path) {
       database.exec(moderationMigration);
       database.exec("PRAGMA user_version = 9");
     }
+    if (version <= 9) {
+      database.exec(notificationMigration);
+      database.exec("PRAGMA user_version = 10");
+    }
     assertCommunityOwnerInvariant(database);
     assertPostInvariant(database);
     assertCommentInvariant(database);
@@ -499,6 +531,7 @@ export function openDatabase(path) {
     assertPersonalInvariant(database);
     assertFeedInvariant(database);
     assertModerationInvariant(database);
+    assertNotificationInvariant(database);
     database.exec("COMMIT");
     return database;
   } catch (error) {

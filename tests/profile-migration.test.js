@@ -19,10 +19,10 @@ test("profile migration creates and reopens the lifecycle schema", async () => {
     assert.ok(columns.some((column) => column.name === "bio"));
     assert.ok(columns.some((column) => column.name === "revision"));
     assert.ok(columns.some((column) => column.name === "deletion_requested_at"));
-    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 9);
+    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 10);
     database.close();
     const reopened = openDatabase(path);
-    assert.equal(reopened.prepare("PRAGMA user_version").get().user_version, 9);
+    assert.equal(reopened.prepare("PRAGMA user_version").get().user_version, 10);
     reopened.close();
   });
 });

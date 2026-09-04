@@ -17,7 +17,7 @@ export class CommentRepository {
       JOIN readable_posts AS post ON post.id = comments.post_id LEFT JOIN users ON users.id = comments.author_user_id WHERE comments.id = ?`);
     this.mutationAdmission = database.prepare(`SELECT comments.author_user_id, comments.state FROM comments
       JOIN readable_posts AS post ON post.id = comments.post_id WHERE comments.id = ?`);
-    this.parentById = database.prepare("SELECT id, post_id, depth FROM comments WHERE id = ?");
+    this.parentById = database.prepare("SELECT id, post_id, depth, author_user_id FROM comments WHERE id = ?");
     this.nextSequence = database.prepare("SELECT COALESCE(MAX(created_sequence), 0) + 1 AS value FROM comments");
     this.insertComment = database.prepare(`INSERT INTO comments (id, post_id, parent_id, author_user_id, body, depth, state, created_sequence)
       VALUES (?, ?, ?, ?, ?, ?, 'active', ?)`);

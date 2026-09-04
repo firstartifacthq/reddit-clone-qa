@@ -9,7 +9,7 @@ export class ModerationRepository {
     this.memberForPost = database.prepare(`SELECT 1 FROM readable_posts AS post JOIN community_memberships AS membership
       ON membership.community_name = post.community_name JOIN users ON users.id = membership.user_id AND users.deletion_requested_at IS NULL
       WHERE post.id = ? AND membership.user_id = ?`);
-    this.canonicalPost = database.prepare("SELECT id, community_name, moderation_state FROM posts WHERE id = ?");
+    this.canonicalPost = database.prepare("SELECT id, community_name, moderation_state, author_user_id FROM posts WHERE id = ?");
     this.readableRepresentation = database.prepare(`SELECT post.*, users.username FROM readable_posts AS post
       JOIN users ON users.id = post.author_user_id AND users.deletion_requested_at IS NULL WHERE post.id = ?`);
     this.authorityFor = database.prepare(`SELECT 1 FROM community_memberships AS membership
@@ -64,6 +64,6 @@ export class ModerationRepository {
   /** @param {string} id */ markRemoved(id) { return this.removePost.run(id).changes; }
   /** @param {string} id */ markRestored(id) { return this.restorePost.run(id).changes; }
   /** @param {{id: string, postId: string, community: string, moderatorId: string, action: "removed" | "restored", occurredAt: number}} event */
-  appendAudit(event) { this.insertAudit.run(event.id, this.nextAuditSequence.get().value, event.postId, event.community, event.moderatorId, event.action, event.occurredAt); }
+  appendAudit(event) { this.insertAudit.run(event.id, this.nextAuditSequence.get().value, event.postId, event.community, event.moderatorId, event.action, event.occurredAt); return event.id; }
   /** @param {string} community */ auditsForCommunity(community) { return this.auditByCommunity.all(community); }
 }
