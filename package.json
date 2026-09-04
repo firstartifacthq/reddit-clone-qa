@@ -6,8 +6,8 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test --no-warnings",
-    "typecheck": "corepack yarn --cwd .dagger install --frozen-lockfile --ignore-scripts --silent && .dagger/node_modules/.bin/tsc --noEmit && node --check src/server.js src/account/*.js src/auth/*.js src/profile/*.js src/community/*.js src/post/*.js src/comment/*.js src/personal/*.js src/vote/*.js src/search/*.js src/feed/*.js src/moderation/*.js tests/*.js",
-    "build": "node --check src/*.js src/account/*.js src/auth/*.js src/profile/*.js src/community/*.js src/post/*.js src/comment/*.js src/personal/*.js src/vote/*.js src/search/*.js src/feed/*.js src/moderation/*.js"
+    "typecheck": "corepack yarn --cwd .dagger install --frozen-lockfile --ignore-scripts --silent && .dagger/node_modules/.bin/tsc --noEmit && node --check src/server.js src/account/*.js src/auth/*.js src/profile/*.js src/community/*.js src/post/*.js src/comment/*.js src/personal/*.js src/vote/*.js src/search/*.js src/feed/*.js src/moderation/*.js src/safety/*.js tests/*.js",
+    "build": "node --check src/*.js src/account/*.js src/auth/*.js src/profile/*.js src/community/*.js src/post/*.js src/comment/*.js src/personal/*.js src/vote/*.js src/search/*.js src/feed/*.js src/moderation/*.js src/safety/*.js"
   },
   "engines": {
     "node": ">=24"

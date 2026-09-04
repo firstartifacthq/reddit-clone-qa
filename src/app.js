@@ -24,13 +24,15 @@ import { FeedService } from "./feed/feed-service.js";
 import { validateFeedPage } from "./feed/feed-validation.js";
 import { ModerationRepository } from "./moderation/moderation-repository.js";
 import { ModerationService } from "./moderation/moderation-service.js";
+import { SafetyRepository } from "./safety/safety-repository.js";
+import { SafetyService } from "./safety/safety-service.js";
 import { validateModerationQueuePage } from "./moderation/moderation-validation.js";
 import { validateCommentPage } from "./comment/comment-validation.js";
 import { canonicalCommunityName } from "./community/community-validation.js";
 import { normalizeUsername } from "./account/username.js";
 import {
   authenticationError, forbiddenError, invalidCommunityError, invalidCredentialsError, invalidProfileError,
-  invalidRequestError, notFoundError, profileUnavailableError, invalidPostError, postConflictError, postUnavailableError,
+  invalidRequestError, notFoundError, profileUnavailableError, invalidPostError, postConflictError, postUnavailableError, postRateLimitedError,
   invalidCommentError, invalidCommentPageError, commentUnavailableError,
   invalidPersonalPageError, invalidPreferencesError, personalUnavailableError, invalidVoteError, voteUnavailableError,
   invalidSearchError, searchUnavailableError, invalidFeedPageError, feedUnavailableError,
@@ -39,7 +41,7 @@ import {
 import { renderShell } from "./public-shell.js";
 
 /** @typedef {{exec: (sql: string) => void, prepare: (sql: string) => any, close: () => void}} Database */
-/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string, beforeMediaPersist?: () => void, beforeCommentPersist?: () => void, beforeSavedPersist?: () => void, beforeHistoryPersist?: () => void, beforePreferencePersist?: () => void, beforeVotePersist?: () => void, beforeSearchRead?: () => void, beforeFeedCommit?: () => void, beforeModerationCommit?: () => void}} AppOptions */
+/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, postRateLimitMax?: number, postRateLimitWindowMs?: number, now?: () => number, randomToken?: () => string, beforeMediaPersist?: () => void, beforePostEnforcement?: () => void, beforeCommentPersist?: () => void, beforeSavedPersist?: () => void, beforeHistoryPersist?: () => void, beforePreferencePersist?: () => void, beforeVotePersist?: () => void, beforeSearchRead?: () => void, beforeFeedCommit?: () => void, beforeModerationCommit?: () => void}} AppOptions */
 /** @typedef {Record<string, string | string[] | undefined>} RequestHeaders */
 /** @typedef {{method?: string, path?: string, headers?: RequestHeaders, payload?: string | Uint8Array}} AppRequest */
 /** @typedef {{status: number, headers: Record<string, string>, body: string | Uint8Array}} AppResponse */
@@ -91,6 +93,12 @@ function publicUsername(pathname) {
 }
 /** @param {string} pathname */
 function privateUserSuffix(pathname) { return /^\/api\/users\/[^/]+\/(saved|history)$/.test(pathname); }
+/** @param {string} pathname @returns {string | undefined} */
+function blockTargetUsername(pathname) {
+  const match = /^\/api\/users\/([^/]+)\/block$/.exec(pathname);
+  if (!match) return undefined;
+  try { return normalizeUsername(decodeURIComponent(match[1])); } catch { return undefined; }
+}
 // null means that this is not a community route; undefined means an invalid route name.
 /** @param {string} pathname @param {string} suffix @returns {string | undefined | null} */
 function communityPath(pathname, suffix) {
@@ -140,7 +148,7 @@ function isJsonContentType(contentType) { return typeof contentType === "string"
 /** @param {AppOptions} [options] */
 export function createApp(options = {}) {
   const {
-    database: injectedDatabase, now, randomToken, beforeMediaPersist, beforeCommentPersist,
+    database: injectedDatabase, now, randomToken, beforeMediaPersist, beforePostEnforcement, beforeCommentPersist,
     beforeSavedPersist, beforeHistoryPersist, beforePreferencePersist, beforeVotePersist, beforeSearchRead, beforeFeedCommit, beforeModerationCommit, ...configOptions
   } = options;
   const config = createConfig(configOptions);
@@ -155,10 +163,12 @@ export function createApp(options = {}) {
   const searchRepository = new SearchRepository(database);
   const feedRepository = new FeedRepository(database);
   const moderationRepository = new ModerationRepository(database);
+  const safetyRepository = new SafetyRepository(database);
   const auth = new AuthService({ repository: authRepository, database, config, now, randomToken });
   const profiles = new ProfileService({ repository: profileRepository, database, now });
   const communities = new CommunityService({ repository: communityRepository, database, now });
-  const posts = new PostService({ repository: postRepository, database, now, beforeMediaPersist });
+  const safety = new SafetyService({ repository: safetyRepository, database, now, postRateLimitMax: config.postRateLimitMax, postRateLimitWindowMs: config.postRateLimitWindowMs, beforePostEnforcement });
+  const posts = new PostService({ repository: postRepository, safety, database, now, beforeMediaPersist });
   const comments = new CommentService({ repository: commentRepository, database, beforeCommentPersist });
   const personal = new PersonalService({ repository: personalRepository, database, now, beforeSavedPersist, beforeHistoryPersist, beforePreferencePersist });
   const votes = new VoteService({ repository: voteRepository, database, beforeVotePersist });
@@ -346,6 +356,16 @@ export function createApp(options = {}) {
         if (result.kind === "not-found") return json(404, notFoundError);
         return json(503, personalUnavailableError);
       }
+      const blockTarget = blockTargetUsername(url.pathname);
+      if (method === "POST" && blockTarget !== undefined) {
+        if (!account) return json(401, authenticationError);
+        if (!blockTarget) return json(404, notFoundError);
+        const result = safety.block(account.id, blockTarget);
+        if (result.kind === "success") return empty(204);
+        if (result.kind === "lost-authority") return json(401, authenticationError);
+        if (result.kind === "not-found") return json(404, notFoundError);
+        return json(503, postUnavailableError, { "retry-after": "1" });
+      }
       if (method === "PATCH" && isPublicUserRoute) return account ? json(403, forbiddenError) : json(401, authenticationError);
       if (method === "GET" && isPublicUserRoute) {
         if (!username) return json(404, notFoundError);
@@ -410,6 +430,8 @@ export function createApp(options = {}) {
         if (result.kind === "conflict") return json(409, postConflictError);
         if (result.kind === "too-large") return json(413, invalidPostError);
         if (result.kind === "invalid") return json(422, invalidPostError);
+        if (result.kind === "rate-limited") return json(429, postRateLimitedError, { "retry-after": String(result.retryAfterSeconds) });
+        if (result.kind === "enforcement-unavailable") return json(503, postUnavailableError, { "retry-after": "1" });
         return json(503, postUnavailableError);
       }
       const commentPostId = postCommentsPath(url.pathname);
