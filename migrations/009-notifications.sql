@@ -6,7 +6,11 @@ CREATE TABLE notification_events (
   kind TEXT NOT NULL CHECK (kind IN ('reply', 'mention', 'vote', 'moderation')),
   related_item_type TEXT NOT NULL CHECK (related_item_type IN ('comment', 'post')),
   related_item_id TEXT NOT NULL,
-  occurred_at INTEGER NOT NULL CHECK (typeof(occurred_at) = 'integer' AND occurred_at >= 0)
+  occurred_at INTEGER NOT NULL CHECK (typeof(occurred_at) = 'integer' AND occurred_at >= 0),
+  CHECK (
+    (kind IN ('reply', 'mention') AND related_item_type = 'comment') OR
+    (kind IN ('vote', 'moderation') AND related_item_type = 'post')
+  )
 );
 CREATE INDEX notification_events_owner_order ON notification_events(recipient_user_id, occurrence_sequence DESC, id ASC);
 
@@ -79,6 +83,13 @@ CREATE TRIGGER notification_traversals_are_immutable
 BEFORE UPDATE ON notification_traversals
 BEGIN
   SELECT RAISE(ABORT, 'notification traversal is immutable');
+END;
+CREATE TRIGGER notification_traversal_item_owner_matches_traversal
+BEFORE INSERT ON notification_traversal_items
+WHEN (SELECT owner_user_id FROM notifications WHERE id = NEW.notification_id) <>
+  (SELECT owner_user_id FROM notification_traversals WHERE id = NEW.traversal_id)
+BEGIN
+  SELECT RAISE(ABORT, 'notification traversal item owner must match traversal owner');
 END;
 CREATE TRIGGER notification_traversal_items_are_immutable
 BEFORE UPDATE ON notification_traversal_items

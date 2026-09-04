@@ -43,7 +43,7 @@ import {
 import { renderShell } from "./public-shell.js";
 
 /** @typedef {{exec: (sql: string) => void, prepare: (sql: string) => any, close: () => void}} Database */
-/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string, beforeMediaPersist?: () => void, beforeCommentPersist?: () => void, beforeSavedPersist?: () => void, beforeHistoryPersist?: () => void, beforePreferencePersist?: () => void, beforeVotePersist?: () => void, beforeSearchRead?: () => void, beforeFeedCommit?: () => void, beforeModerationCommit?: () => void}} AppOptions */
+/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string, beforeMediaPersist?: () => void, beforeCommentPersist?: () => void, beforeSavedPersist?: () => void, beforeHistoryPersist?: () => void, beforePreferencePersist?: () => void, beforeVotePersist?: () => void, beforeSearchRead?: () => void, beforeFeedCommit?: () => void, beforeModerationCommit?: () => void, beforeNotificationDelivery?: () => void}} AppOptions */
 /** @typedef {Record<string, string | string[] | undefined>} RequestHeaders */
 /** @typedef {{method?: string, path?: string, headers?: RequestHeaders, payload?: string | Uint8Array}} AppRequest */
 /** @typedef {{status: number, headers: Record<string, string>, body: string | Uint8Array}} AppResponse */
@@ -149,7 +149,7 @@ function isJsonContentType(contentType) { return typeof contentType === "string"
 export function createApp(options = {}) {
   const {
     database: injectedDatabase, now, randomToken, beforeMediaPersist, beforeCommentPersist,
-    beforeSavedPersist, beforeHistoryPersist, beforePreferencePersist, beforeVotePersist, beforeSearchRead, beforeFeedCommit, beforeModerationCommit, ...configOptions
+    beforeSavedPersist, beforeHistoryPersist, beforePreferencePersist, beforeVotePersist, beforeSearchRead, beforeFeedCommit, beforeModerationCommit, beforeNotificationDelivery, ...configOptions
   } = options;
   const config = createConfig(configOptions);
   const database = injectedDatabase || openDatabase(config.databasePath);
@@ -164,7 +164,7 @@ export function createApp(options = {}) {
   const feedRepository = new FeedRepository(database);
   const moderationRepository = new ModerationRepository(database);
   const notificationRepository = new NotificationRepository(database);
-  const notifications = new NotificationService({ repository: notificationRepository, database, now, randomToken });
+  const notifications = new NotificationService({ repository: notificationRepository, database, now, randomToken, beforeDelivery: beforeNotificationDelivery });
   const auth = new AuthService({ repository: authRepository, database, config, now, randomToken });
   const profiles = new ProfileService({ repository: profileRepository, database, now });
   const communities = new CommunityService({ repository: communityRepository, database, now });

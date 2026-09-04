@@ -27,11 +27,15 @@ export class NotificationRepository {
       JOIN notification_traversals AS traversal ON traversal.id = token.traversal_id
       WHERE token.token = ? AND traversal.owner_user_id = ? AND traversal.expires_at > ?`);
     this.page = database.prepare(`SELECT item.ordinal, notification.id, event.kind, event.related_item_type, event.related_item_id, event.occurred_at, notification.read_state
-      FROM notification_traversal_items AS item JOIN notifications AS notification ON notification.id = item.notification_id
+      FROM notification_traversal_items AS item
+      JOIN notification_traversals AS traversal ON traversal.id = item.traversal_id
+      JOIN notifications AS notification ON notification.id = item.notification_id AND notification.owner_user_id = traversal.owner_user_id
       JOIN notification_events AS event ON event.id = notification.event_id
-      WHERE item.traversal_id = ? AND item.ordinal >= ? AND notification.deleted_at IS NULL ORDER BY item.ordinal LIMIT ?`);
-    this.more = database.prepare(`SELECT 1 FROM notification_traversal_items AS item JOIN notifications AS notification ON notification.id = item.notification_id
-      WHERE item.traversal_id = ? AND item.ordinal >= ? AND notification.deleted_at IS NULL LIMIT 1`);
+      WHERE item.traversal_id = ? AND traversal.owner_user_id = ? AND item.ordinal >= ? AND notification.deleted_at IS NULL ORDER BY item.ordinal LIMIT ?`);
+    this.more = database.prepare(`SELECT 1 FROM notification_traversal_items AS item
+      JOIN notification_traversals AS traversal ON traversal.id = item.traversal_id
+      JOIN notifications AS notification ON notification.id = item.notification_id AND notification.owner_user_id = traversal.owner_user_id
+      WHERE item.traversal_id = ? AND traversal.owner_user_id = ? AND item.ordinal >= ? AND notification.deleted_at IS NULL LIMIT 1`);
     this.insertToken = database.prepare("INSERT OR IGNORE INTO notification_page_tokens (token, traversal_id, start_ordinal) VALUES (?, ?, ?)");
     this.tokenAtStart = database.prepare("SELECT token FROM notification_page_tokens WHERE traversal_id = ? AND start_ordinal = ?");
   }
@@ -52,7 +56,7 @@ export class NotificationRepository {
   /** @param {string} id @param {string} owner @param {string} key @param {number} now @param {{id: string}[]} rows */
   createTraversal(id, owner, key, now, rows) { const result = this.insertTraversal.run(id, owner, key, now, now + 86_400_000); if (result.changes) rows.forEach((row, ordinal) => this.insertItem.run(id, ordinal, row.id)); return result.changes ? id : this.traversalFor(owner, key, now); }
   /** @param {string} token @param {string} owner @param {number} now */ tokenFor(token, owner, now) { return this.token.get(token, owner, now); }
-  /** @param {string} id @param {number} start @param {number} limit */ pageFor(id, start, limit) { return this.page.all(id, start, limit); }
-  /** @param {string} id @param {number} start */ hasMore(id, start) { return Boolean(this.more.get(id, start)); }
+  /** @param {string} id @param {string} owner @param {number} start @param {number} limit */ pageFor(id, owner, start, limit) { return this.page.all(id, owner, start, limit); }
+  /** @param {string} id @param {string} owner @param {number} start */ hasMore(id, owner, start) { return Boolean(this.more.get(id, owner, start)); }
   /** @param {string} token @param {string} traversal @param {number} start */ createToken(token, traversal, start) { this.insertToken.run(token, traversal, start); return this.tokenAtStart.get(traversal, start).token; }
 }

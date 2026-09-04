@@ -14,12 +14,13 @@ function mentionedNames(body) {
 }
 
 export class NotificationService {
-  /** @param {{repository: import("./notification-repository.js").NotificationRepository, database: {exec: (sql: string) => void}, now?: () => number, randomToken?: () => string}} options */
-  constructor({ repository, database, now = Date.now, randomToken = randomUUID }) { this.repository = repository; this.database = database; this.now = now; this.randomToken = randomToken; }
+  /** @param {{repository: import("./notification-repository.js").NotificationRepository, database: {exec: (sql: string) => void}, now?: () => number, randomToken?: () => string, beforeDelivery?: () => void}} options */
+  constructor({ repository, database, now = Date.now, randomToken = randomUUID, beforeDelivery = () => {} }) { this.repository = repository; this.database = database; this.now = now; this.randomToken = randomToken; this.beforeDelivery = beforeDelivery; }
   /** @param {{eventKey: string, recipientId: string, kind: "reply" | "mention" | "vote" | "moderation", itemType: "comment" | "post", itemId: string, occurredAt?: number}} input */
   record(input) {
     if (!this.repository.isActiveUser(input.recipientId)) return;
     const event = this.repository.recordEvent({ id: randomUUID(), ...input, occurredAt: input.occurredAt ?? this.now() });
+    this.beforeDelivery();
     this.repository.deliver(event);
   }
   /** @param {{id: string, author_user_id: string} | undefined} parent @param {{id: string, authorId: string, body: string}} comment */
@@ -49,8 +50,8 @@ export class NotificationService {
         if (rows.length <= limit) { this.database.exec("COMMIT"); return { kind: "success", notifications: rows.map(notificationRepresentation), nextCursor: null }; }
         const key = membershipKey(rows); traversal = this.repository.traversalFor(owner, key, this.now()) ?? this.repository.createTraversal(randomUUID(), owner, key, this.now(), rows); start = 0;
       }
-      const rows = this.repository.pageFor(traversal, start, limit); const nextStart = rows.length ? rows.at(-1).ordinal + 1 : start;
-      const nextCursor = this.repository.hasMore(traversal, nextStart) ? this.repository.createToken(this.randomToken(), traversal, nextStart) : null;
+      const rows = this.repository.pageFor(traversal, owner, start, limit); const nextStart = rows.length ? rows.at(-1).ordinal + 1 : start;
+      const nextCursor = this.repository.hasMore(traversal, owner, nextStart) ? this.repository.createToken(this.randomToken(), traversal, nextStart) : null;
       this.database.exec("COMMIT"); return { kind: "success", notifications: rows.map(notificationRepresentation), nextCursor };
     } catch { rollback(this.database); return { kind: "unavailable" }; }
   }

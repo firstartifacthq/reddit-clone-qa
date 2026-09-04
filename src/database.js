@@ -384,28 +384,153 @@ function assertModerationInvariant(database) {
 
 /** @param {Database} database */
 function assertNotificationInvariant(database) {
+  const binary = "BINARY";
   const fail = () => { throw new Error("notification invariant is invalid"); };
-  const expected = {
-    notification_events: [["id", "TEXT", 1, 1], ["event_key", "TEXT", 1, 0], ["occurrence_sequence", "INTEGER", 1, 0], ["recipient_user_id", "TEXT", 1, 0], ["kind", "TEXT", 1, 0], ["related_item_type", "TEXT", 1, 0], ["related_item_id", "TEXT", 1, 0], ["occurred_at", "INTEGER", 1, 0]],
-    notifications: [["id", "TEXT", 1, 1], ["event_id", "TEXT", 1, 0], ["owner_user_id", "TEXT", 1, 0], ["read_state", "INTEGER", 1, 0], ["deleted_at", "INTEGER", 0, 0]],
-    notification_traversals: [["id", "TEXT", 1, 1], ["owner_user_id", "TEXT", 1, 0], ["snapshot_key", "TEXT", 1, 0], ["created_at", "INTEGER", 1, 0], ["expires_at", "INTEGER", 1, 0]],
-    notification_traversal_items: [["traversal_id", "TEXT", 1, 1], ["ordinal", "INTEGER", 1, 2], ["notification_id", "TEXT", 1, 0]],
-    notification_page_tokens: [["token", "TEXT", 1, 1], ["traversal_id", "TEXT", 1, 0], ["start_ordinal", "INTEGER", 1, 0]],
+  /** @param {string} table @param {any[][]} expected */
+  const columnsMatch = (table, expected) => JSON.stringify(database.prepare(`PRAGMA table_info(${table})`).all()
+    .map((/** @type {any} */ column) => [column.name, column.type, column.notnull, column.dflt_value, column.pk])) === JSON.stringify(expected);
+  /** @param {string} table @param {string[][]} expected */
+  const foreignKeysMatch = (table, expected) => {
+    const actual = database.prepare(`PRAGMA foreign_key_list(${table})`).all()
+      .map((/** @type {any} */ key) => [key.from, key.table, key.to, key.on_update, key.on_delete, key.match]).sort();
+    return JSON.stringify(actual) === JSON.stringify([...expected].sort());
   };
-  for (const [table, columns] of Object.entries(expected)) {
-    const actual = database.prepare(`PRAGMA table_info(${table})`).all().map((/** @type {any} */ column) => [column.name, column.type, column.notnull, column.pk]);
-    if (JSON.stringify(actual) !== JSON.stringify(columns)) fail();
-  }
-  /** @param {string} name */
-  const sql = (name) => normalizedSql(database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?").get(name)?.sql || "");
-  if (!sql("notification_events").includes("check (kind in ('reply', 'mention', 'vote', 'moderation'))") ||
-    !sql("notification_events").includes("check (related_item_type in ('comment', 'post'))") ||
-    !sql("notifications").includes("check (typeof(read_state) = 'integer' and read_state in (0, 1))")) fail();
-  const names = ["notification_events_are_immutable", "notification_events_cannot_be_deleted", "notifications_owner_matches_event", "notifications_owner_is_immutable", "notifications_cannot_be_hard_deleted", "notifications_deletion_is_one_way", "notification_traversals_are_immutable", "notification_traversal_items_are_immutable", "notification_page_tokens_are_immutable"];
-  if (database.prepare(`SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'trigger' AND name IN (${names.map(() => "?").join(",")})`).get(...names).count !== names.length) fail();
-  const invalid = database.prepare(`SELECT 1 FROM notification_events WHERE occurrence_sequence < 1 OR kind NOT IN ('reply','mention','vote','moderation') OR related_item_type NOT IN ('comment','post') OR occurred_at < 0
-    UNION ALL SELECT 1 FROM notifications WHERE read_state NOT IN (0,1) OR (deleted_at IS NOT NULL AND deleted_at < 0)
-    UNION ALL SELECT 1 FROM notification_traversals WHERE expires_at <= created_at LIMIT 1`).get();
+  /** @param {string} table @param {[string, [string, number, string][]][]} expected */
+  const uniqueConstraintsMatch = (table, expected) => {
+    const actual = database.prepare(`PRAGMA index_list(${table})`).all()
+      .filter((/** @type {any} */ index) => index.unique === 1)
+      .map((/** @type {any} */ index) => [index.origin, database.prepare("SELECT name, desc, coll FROM pragma_index_xinfo(?) WHERE key = 1 ORDER BY seqno").all(index.name)
+        .map((/** @type {any} */ part) => [part.name, part.desc, part.coll])])
+      .sort((/** @type {any} */ left, /** @type {any} */ right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+    return JSON.stringify(actual) === JSON.stringify([...expected].sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))));
+  };
+  /** @param {string} table @param {string} name @param {number} unique @param {[string, number, string][]} columns */
+  const indexMatches = (table, name, unique, columns) => {
+    const index = database.prepare(`PRAGMA index_list(${table})`).all().find((/** @type {any} */ entry) => entry.name === name);
+    const actual = index && database.prepare("SELECT name, desc, coll FROM pragma_index_xinfo(?) WHERE key = 1 ORDER BY seqno").all(name)
+      .map((/** @type {any} */ part) => [part.name, part.desc, part.coll]);
+    return index?.unique === unique && index?.origin === "c" && JSON.stringify(actual) === JSON.stringify(columns);
+  };
+
+  const expectedColumns = {
+    notification_events: [["id", "TEXT", 1, null, 1], ["event_key", "TEXT", 1, null, 0], ["occurrence_sequence", "INTEGER", 1, null, 0], ["recipient_user_id", "TEXT", 1, null, 0], ["kind", "TEXT", 1, null, 0], ["related_item_type", "TEXT", 1, null, 0], ["related_item_id", "TEXT", 1, null, 0], ["occurred_at", "INTEGER", 1, null, 0]],
+    notifications: [["id", "TEXT", 1, null, 1], ["event_id", "TEXT", 1, null, 0], ["owner_user_id", "TEXT", 1, null, 0], ["read_state", "INTEGER", 1, "0", 0], ["deleted_at", "INTEGER", 0, null, 0]],
+    notification_traversals: [["id", "TEXT", 1, null, 1], ["owner_user_id", "TEXT", 1, null, 0], ["snapshot_key", "TEXT", 1, null, 0], ["created_at", "INTEGER", 1, null, 0], ["expires_at", "INTEGER", 1, null, 0]],
+    notification_traversal_items: [["traversal_id", "TEXT", 1, null, 1], ["ordinal", "INTEGER", 1, null, 2], ["notification_id", "TEXT", 1, null, 0]],
+    notification_page_tokens: [["token", "TEXT", 1, null, 1], ["traversal_id", "TEXT", 1, null, 0], ["start_ordinal", "INTEGER", 1, null, 0]],
+  };
+  if (!Object.entries(expectedColumns).every(([table, expected]) => columnsMatch(table, expected))) fail();
+
+  const expectedTableSql = {
+    notification_events: `CREATE TABLE notification_events (
+      id TEXT PRIMARY KEY NOT NULL,
+      event_key TEXT NOT NULL UNIQUE,
+      occurrence_sequence INTEGER NOT NULL UNIQUE CHECK (typeof(occurrence_sequence) = 'integer' AND occurrence_sequence > 0),
+      recipient_user_id TEXT NOT NULL REFERENCES users(id),
+      kind TEXT NOT NULL CHECK (kind IN ('reply', 'mention', 'vote', 'moderation')),
+      related_item_type TEXT NOT NULL CHECK (related_item_type IN ('comment', 'post')),
+      related_item_id TEXT NOT NULL,
+      occurred_at INTEGER NOT NULL CHECK (typeof(occurred_at) = 'integer' AND occurred_at >= 0),
+      CHECK (
+        (kind IN ('reply', 'mention') AND related_item_type = 'comment') OR
+        (kind IN ('vote', 'moderation') AND related_item_type = 'post')
+      )
+    )`,
+    notifications: `CREATE TABLE notifications (
+      id TEXT PRIMARY KEY NOT NULL,
+      event_id TEXT NOT NULL UNIQUE REFERENCES notification_events(id),
+      owner_user_id TEXT NOT NULL REFERENCES users(id),
+      read_state INTEGER NOT NULL DEFAULT 0 CHECK (typeof(read_state) = 'integer' AND read_state IN (0, 1)),
+      deleted_at INTEGER CHECK (deleted_at IS NULL OR (typeof(deleted_at) = 'integer' AND deleted_at >= 0)),
+      UNIQUE (owner_user_id, event_id)
+    )`,
+    notification_traversals: `CREATE TABLE notification_traversals (
+      id TEXT PRIMARY KEY NOT NULL,
+      owner_user_id TEXT NOT NULL REFERENCES users(id),
+      snapshot_key TEXT NOT NULL CHECK (length(snapshot_key) = 64 AND snapshot_key NOT GLOB '*[^0-9a-f]*'),
+      created_at INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at >= 0),
+      expires_at INTEGER NOT NULL CHECK (typeof(expires_at) = 'integer' AND expires_at > created_at),
+      UNIQUE (owner_user_id, snapshot_key)
+    )`,
+    notification_traversal_items: `CREATE TABLE notification_traversal_items (
+      traversal_id TEXT NOT NULL REFERENCES notification_traversals(id) ON DELETE CASCADE,
+      ordinal INTEGER NOT NULL CHECK (typeof(ordinal) = 'integer' AND ordinal >= 0),
+      notification_id TEXT NOT NULL REFERENCES notifications(id),
+      PRIMARY KEY (traversal_id, ordinal),
+      UNIQUE (traversal_id, notification_id)
+    )`,
+    notification_page_tokens: `CREATE TABLE notification_page_tokens (
+      token TEXT PRIMARY KEY NOT NULL,
+      traversal_id TEXT NOT NULL REFERENCES notification_traversals(id) ON DELETE CASCADE,
+      start_ordinal INTEGER NOT NULL CHECK (typeof(start_ordinal) = 'integer' AND start_ordinal >= 0),
+      UNIQUE (traversal_id, start_ordinal)
+    )`,
+  };
+  if (!Object.entries(expectedTableSql).every(([name, expected]) => normalizedSql(database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?").get(name)?.sql || "") === normalizedSql(expected))) fail();
+
+  if (!foreignKeysMatch("notification_events", [["recipient_user_id", "users", "id", "NO ACTION", "NO ACTION", "NONE"]]) ||
+    !foreignKeysMatch("notifications", [["event_id", "notification_events", "id", "NO ACTION", "NO ACTION", "NONE"], ["owner_user_id", "users", "id", "NO ACTION", "NO ACTION", "NONE"]]) ||
+    !foreignKeysMatch("notification_traversals", [["owner_user_id", "users", "id", "NO ACTION", "NO ACTION", "NONE"]]) ||
+    !foreignKeysMatch("notification_traversal_items", [["notification_id", "notifications", "id", "NO ACTION", "NO ACTION", "NONE"], ["traversal_id", "notification_traversals", "id", "NO ACTION", "CASCADE", "NONE"]]) ||
+    !foreignKeysMatch("notification_page_tokens", [["traversal_id", "notification_traversals", "id", "NO ACTION", "CASCADE", "NONE"]])) fail();
+
+  if (!uniqueConstraintsMatch("notification_events", [["pk", [["id", 0, binary]]], ["u", [["event_key", 0, binary]]], ["u", [["occurrence_sequence", 0, binary]]]]) ||
+    !uniqueConstraintsMatch("notifications", [["pk", [["id", 0, binary]]], ["u", [["event_id", 0, binary]]], ["u", [["owner_user_id", 0, binary], ["event_id", 0, binary]]]]) ||
+    !uniqueConstraintsMatch("notification_traversals", [["pk", [["id", 0, binary]]], ["u", [["owner_user_id", 0, binary], ["snapshot_key", 0, binary]]]]) ||
+    !uniqueConstraintsMatch("notification_traversal_items", [["pk", [["traversal_id", 0, binary], ["ordinal", 0, binary]]], ["u", [["traversal_id", 0, binary], ["notification_id", 0, binary]]]]) ||
+    !uniqueConstraintsMatch("notification_page_tokens", [["pk", [["token", 0, binary]]], ["u", [["traversal_id", 0, binary], ["start_ordinal", 0, binary]]]])) fail();
+
+  const expectedCreatedIndexes = {
+    notification_events: ["notification_events_owner_order"], notifications: ["notifications_owner_order"],
+    notification_traversals: ["notification_traversals_expiry"], notification_traversal_items: [], notification_page_tokens: [],
+  };
+  const createdIndexesMatch = Object.entries(expectedCreatedIndexes).every(([table, expected]) => JSON.stringify(database.prepare(`PRAGMA index_list(${table})`).all()
+    .filter((/** @type {any} */ index) => index.origin === "c").map((/** @type {any} */ index) => index.name).sort()) === JSON.stringify([...expected].sort()));
+  if (!createdIndexesMatch ||
+    !indexMatches("notification_events", "notification_events_owner_order", 0, [["recipient_user_id", 0, binary], ["occurrence_sequence", 1, binary], ["id", 0, binary]]) ||
+    !indexMatches("notifications", "notifications_owner_order", 0, [["owner_user_id", 0, binary], ["deleted_at", 0, binary], ["id", 0, binary]]) ||
+    !indexMatches("notification_traversals", "notification_traversals_expiry", 0, [["expires_at", 0, binary]])) fail();
+
+  const expectedTriggers = {
+    notification_events_are_immutable: "create trigger notification_events_are_immutable before update on notification_events begin select raise(abort, 'notification event is immutable'); end",
+    notification_events_cannot_be_deleted: "create trigger notification_events_cannot_be_deleted before delete on notification_events begin select raise(abort, 'notification event cannot be deleted'); end",
+    notifications_owner_matches_event: "create trigger notifications_owner_matches_event before insert on notifications when new.owner_user_id <> (select recipient_user_id from notification_events where id = new.event_id) begin select raise(abort, 'notification owner must match event recipient'); end",
+    notifications_owner_is_immutable: "create trigger notifications_owner_is_immutable before update of owner_user_id, event_id on notifications begin select raise(abort, 'notification ownership is immutable'); end",
+    notifications_cannot_be_hard_deleted: "create trigger notifications_cannot_be_hard_deleted before delete on notifications begin select raise(abort, 'notification cannot be hard deleted'); end",
+    notifications_deletion_is_one_way: "create trigger notifications_deletion_is_one_way before update on notifications when old.deleted_at is not null begin select raise(abort, 'notification deletion is terminal'); end",
+    notification_traversals_are_immutable: "create trigger notification_traversals_are_immutable before update on notification_traversals begin select raise(abort, 'notification traversal is immutable'); end",
+    notification_traversal_item_owner_matches_traversal: "create trigger notification_traversal_item_owner_matches_traversal before insert on notification_traversal_items when (select owner_user_id from notifications where id = new.notification_id) <> (select owner_user_id from notification_traversals where id = new.traversal_id) begin select raise(abort, 'notification traversal item owner must match traversal owner'); end",
+    notification_traversal_items_are_immutable: "create trigger notification_traversal_items_are_immutable before update on notification_traversal_items begin select raise(abort, 'notification traversal item is immutable'); end",
+    notification_page_tokens_are_immutable: "create trigger notification_page_tokens_are_immutable before update on notification_page_tokens begin select raise(abort, 'notification page token is immutable'); end",
+  };
+  const actualTriggerNames = database.prepare(`SELECT name FROM sqlite_schema WHERE type = 'trigger' AND tbl_name IN
+    ('notification_events', 'notifications', 'notification_traversals', 'notification_traversal_items', 'notification_page_tokens') ORDER BY name`).all().map((/** @type {{name: string}} */ row) => row.name);
+  if (JSON.stringify(actualTriggerNames) !== JSON.stringify(Object.keys(expectedTriggers).sort()) ||
+    !Object.entries(expectedTriggers).every(([name, expected]) => normalizedSql(database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = ?").get(name)?.sql || "") === normalizedSql(expected))) fail();
+
+  const invalid = database.prepare(`SELECT 1 FROM notification_events WHERE typeof(occurrence_sequence) <> 'integer' OR occurrence_sequence < 1
+      OR kind NOT IN ('reply','mention','vote','moderation') OR related_item_type NOT IN ('comment','post')
+      OR NOT ((kind IN ('reply','mention') AND related_item_type = 'comment') OR (kind IN ('vote','moderation') AND related_item_type = 'post'))
+      OR typeof(occurred_at) <> 'integer' OR occurred_at < 0
+    UNION ALL SELECT 1 FROM notifications AS notification JOIN notification_events AS event ON event.id = notification.event_id
+      WHERE typeof(notification.read_state) <> 'integer' OR notification.read_state NOT IN (0,1)
+      OR (notification.deleted_at IS NOT NULL AND (typeof(notification.deleted_at) <> 'integer' OR notification.deleted_at < 0))
+      OR notification.owner_user_id <> event.recipient_user_id
+    UNION ALL SELECT 1 FROM notification_traversals WHERE length(snapshot_key) <> 64 OR snapshot_key GLOB '*[^0-9a-f]*'
+      OR typeof(created_at) <> 'integer' OR created_at < 0 OR typeof(expires_at) <> 'integer' OR expires_at <= created_at
+    UNION ALL SELECT 1 FROM notification_traversal_items AS item
+      JOIN notification_traversals AS traversal ON traversal.id = item.traversal_id
+      JOIN notifications AS notification ON notification.id = item.notification_id
+      WHERE typeof(item.ordinal) <> 'integer' OR item.ordinal < 0 OR notification.owner_user_id <> traversal.owner_user_id
+    UNION ALL SELECT 1 FROM notification_page_tokens WHERE typeof(start_ordinal) <> 'integer' OR start_ordinal < 0
+    UNION ALL SELECT 1 FROM (SELECT event_key FROM notification_events GROUP BY event_key HAVING COUNT(*) > 1)
+    UNION ALL SELECT 1 FROM (SELECT occurrence_sequence FROM notification_events GROUP BY occurrence_sequence HAVING COUNT(*) > 1)
+    UNION ALL SELECT 1 FROM (SELECT event_id FROM notifications GROUP BY event_id HAVING COUNT(*) > 1)
+    UNION ALL SELECT 1 FROM (SELECT owner_user_id, snapshot_key FROM notification_traversals GROUP BY owner_user_id, snapshot_key HAVING COUNT(*) > 1)
+    UNION ALL SELECT 1 FROM (SELECT traversal_id, ordinal FROM notification_traversal_items GROUP BY traversal_id, ordinal HAVING COUNT(*) > 1)
+    UNION ALL SELECT 1 FROM (SELECT traversal_id, notification_id FROM notification_traversal_items GROUP BY traversal_id, notification_id HAVING COUNT(*) > 1)
+    UNION ALL SELECT 1 FROM (SELECT traversal_id, start_ordinal FROM notification_page_tokens GROUP BY traversal_id, start_ordinal HAVING COUNT(*) > 1)
+    LIMIT 1`).get();
   if (invalid || database.prepare("PRAGMA foreign_key_check").get()) fail();
 }
 
@@ -528,10 +653,11 @@ export function openDatabase(path) {
     assertPostInvariant(database);
     assertCommentInvariant(database);
     assertVoteInvariant(database);
+    // Notification runs before older global foreign-key checks so notification corruption is classified at its owning boundary.
+    assertNotificationInvariant(database);
     assertPersonalInvariant(database);
     assertFeedInvariant(database);
     assertModerationInvariant(database);
-    assertNotificationInvariant(database);
     database.exec("COMMIT");
     return database;
   } catch (error) {
