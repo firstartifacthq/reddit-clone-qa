@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { request as httpRequest } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -68,6 +69,12 @@ test("AC-RC10-7 leaves diagnostic endpoint indistinguishable from an unknown rou
 test("MC-RC10-001 bounds post bodies while streaming at the real HTTP boundary", async () => {
   await withApp(async ({ app, request }) => {
     const owner = await member(request);
+    let applicationHandleCalls = 0;
+    const applicationHandle = app.handle;
+    app.handle = async (incoming) => {
+      applicationHandleCalls += 1;
+      return applicationHandle(incoming);
+    };
     const server = createHttpServer(app);
     await new Promise((resolve, reject) => {
       server.once("error", reject);
@@ -103,6 +110,33 @@ test("MC-RC10-001 bounds post bodies while streaming at the real HTTP boundary",
         assert.deepEqual(await response.json(), { error: "Invalid post" });
         assert.deepEqual(counts(app), before);
       }
+      const callsBeforeAbsoluteForm = applicationHandleCalls;
+      const absoluteForm = await new Promise((resolve, reject) => {
+        const outbound = httpRequest({
+          hostname: "127.0.0.1",
+          port: address.port,
+          method: "POST",
+          path: url,
+          headers: { "content-type": "application/json", cookie: owner.cookie },
+        }, (response) => {
+          const chunks = [];
+          response.on("data", (chunk) => chunks.push(chunk));
+          response.once("end", () => resolve({
+            status: response.statusCode,
+            contentType: response.headers["content-type"],
+            body: Buffer.concat(chunks).toString("utf8"),
+          }));
+        });
+        outbound.once("error", reject);
+        outbound.end(malformed);
+      });
+      assert.deepEqual(absoluteForm, {
+        status: 413,
+        contentType: "application/json; charset=utf-8",
+        body: JSON.stringify({ error: "Invalid post" }),
+      });
+      assert.equal(applicationHandleCalls, callsBeforeAbsoluteForm);
+      assert.deepEqual(counts(app), before);
       const injected = await request("/api/communities/safety/posts", {
         method: "POST",
         headers: { "content-type": "application/json", cookie: owner.cookie },

@@ -4,8 +4,17 @@ import { createApp } from "./app.js";
 import { invalidPostError } from "./http-errors.js";
 import { POST_BODY_LIMIT_BYTES } from "./post/post-service.js";
 
-const postCreationPath = /^\/api\/communities\/[^/?]+\/posts(?:\?|$)/;
+const postCreationPath = /^\/api\/communities\/[^/]+\/posts$/;
 const tooLargeResponse = JSON.stringify(invalidPostError);
+
+/** @param {string | undefined} requestTarget */
+function isPostCreationTarget(requestTarget) {
+  try {
+    return postCreationPath.test(new URL(requestTarget || "/", "http://localhost").pathname);
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Retain chunks only until limit. Once crossed, release retained chunks and keep
@@ -37,7 +46,7 @@ function readBody(request, limit) {
 export function createHttpServer(app = createApp()) {
   return createServer(async (request, response) => {
     try {
-      const boundedPost = request.method === "POST" && postCreationPath.test(request.url || "");
+      const boundedPost = request.method === "POST" && isPostCreationTarget(request.url);
       const payload = await readBody(request, boundedPost ? POST_BODY_LIMIT_BYTES : Number.MAX_SAFE_INTEGER);
       if (boundedPost && payload === undefined) {
         response.writeHead(413, { "content-type": "application/json; charset=utf-8" });
