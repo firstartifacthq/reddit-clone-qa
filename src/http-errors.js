@@ -24,3 +24,7 @@ export const feedUnavailableError = Object.freeze({ error: "Feed unavailable" })
 export const invalidModerationQueuePageError = Object.freeze({ error: "Invalid moderation queue page" });
 export const moderationUnavailableError = Object.freeze({ error: "Moderation unavailable" });
 export const methodNotAllowedError = Object.freeze({ error: "Method not allowed" });
+export const invalidNotificationPageError = Object.freeze({ error: "Invalid notification page" });
+export const invalidNotificationError = Object.freeze({ error: "Invalid notification" });
+export const notificationNotFoundError = Object.freeze({ error: "Notification unavailable" });
+export const notificationUnavailableError = Object.freeze({ error: "Notification service unavailable" });

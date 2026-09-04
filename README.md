@@ -26,6 +26,9 @@ Optional non-secret configuration is captured when the application starts:
 - `GET`, `PATCH /api/me/preferences`
 - `GET /api/me/saved`
 - `GET /api/me/history`
+- `GET /api/me/notifications?limit=:limit&cursor=:cursor`
+- `PATCH`, `DELETE /api/me/notifications/:id`
+- `GET /api/users/:username/notifications`
 - `PUT`, `DELETE /api/posts/:id/save`
 - `GET /api/users/:username`
 - `GET /api/communities`
@@ -62,6 +65,8 @@ Authenticated active users can set or replace their own vote as JSON `{ "value":
 Active community members can add JSON comments to a readable post, either top-level or with a same-post `parentId`. Conversations are depth-first pre-order pages; `limit` defaults to 25 and accepts 1 through 100. Returned cursors are opaque, resumable snapshots, so later comments do not enter an existing traversal. Comment authors may edit active comments or replace them with privacy-preserving tombstones while descendants retain their original nesting.
 
 Authenticated active users can save a readable post and retrieve their saved posts or 90-day post-view history through owner-scoped, opaque paginated snapshots. A successful authenticated non-media post read records the latest view for that user and post. Preferences default to `{ "theme": "system", "compactMode": false }`; preference patches update only supplied valid fields atomically. Other users' saved and history routes always deny without revealing private records.
+
+Notifications are private to their active owner. Eligible replies, standalone case-insensitive `u/username` mentions, effective votes on another user's post, and moderator removal of another user's post create one durable notice. Inbox pages are newest-event-first and use owner-bound opaque snapshots; owners can toggle `{ "read": true|false }` and terminally delete a notice. The delivery retry operation is available only through the application’s trusted in-process adapter and never accepts user-controlled authorization or a production secret.
 
 `GET /api/search` accepts exactly one non-empty, trimmed `q` and an optional `type` of `community`, `post`, or `comment`. It returns `{ "results": [] }` or deterministic communities, posts, and active comments using type-specific fields. Invalid search input returns HTTP 400 `{ "error": "Invalid search" }`; a transient search read failure returns HTTP 503 `{ "error": "Search unavailable" }` with `Retry-After: 1`. Search reads canonical current state and does not record post-view history or create other user state.
 
