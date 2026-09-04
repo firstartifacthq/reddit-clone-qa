@@ -22,6 +22,9 @@ import { validateSearch } from "./search/search-validation.js";
 import { FeedRepository } from "./feed/feed-repository.js";
 import { FeedService } from "./feed/feed-service.js";
 import { validateFeedPage } from "./feed/feed-validation.js";
+import { ModerationRepository } from "./moderation/moderation-repository.js";
+import { ModerationService } from "./moderation/moderation-service.js";
+import { validateModerationQueuePage } from "./moderation/moderation-validation.js";
 import { validateCommentPage } from "./comment/comment-validation.js";
 import { canonicalCommunityName } from "./community/community-validation.js";
 import { normalizeUsername } from "./account/username.js";
@@ -31,11 +34,12 @@ import {
   invalidCommentError, invalidCommentPageError, commentUnavailableError,
   invalidPersonalPageError, invalidPreferencesError, personalUnavailableError, invalidVoteError, voteUnavailableError,
   invalidSearchError, searchUnavailableError, invalidFeedPageError, feedUnavailableError,
+  invalidModerationQueuePageError, moderationUnavailableError, methodNotAllowedError,
 } from "./http-errors.js";
 import { renderShell } from "./public-shell.js";
 
 /** @typedef {{exec: (sql: string) => void, prepare: (sql: string) => any, close: () => void}} Database */
-/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string, beforeMediaPersist?: () => void, beforeCommentPersist?: () => void, beforeSavedPersist?: () => void, beforeHistoryPersist?: () => void, beforePreferencePersist?: () => void, beforeVotePersist?: () => void, beforeSearchRead?: () => void, beforeFeedCommit?: () => void}} AppOptions */
+/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, now?: () => number, randomToken?: () => string, beforeMediaPersist?: () => void, beforeCommentPersist?: () => void, beforeSavedPersist?: () => void, beforeHistoryPersist?: () => void, beforePreferencePersist?: () => void, beforeVotePersist?: () => void, beforeSearchRead?: () => void, beforeFeedCommit?: () => void, beforeModerationCommit?: () => void}} AppOptions */
 /** @typedef {Record<string, string | string[] | undefined>} RequestHeaders */
 /** @typedef {{method?: string, path?: string, headers?: RequestHeaders, payload?: string | Uint8Array}} AppRequest */
 /** @typedef {{status: number, headers: Record<string, string>, body: string | Uint8Array}} AppResponse */
@@ -101,6 +105,18 @@ function postPath(pathname) {
   try { return { id: decodeURIComponent(match[1]), media: Boolean(match[2]) }; } catch { return undefined; }
 }
 /** @param {string} pathname */
+function reportPath(pathname) {
+  const match = /^\/api\/posts\/([^/]+)\/reports$/.exec(pathname);
+  if (!match) return undefined;
+  try { return decodeURIComponent(match[1]); } catch { return undefined; }
+}
+/** @param {string} pathname */
+function moderationPostPath(pathname, suffix = "") {
+  const match = new RegExp(`^/api/mod/posts/([^/]+)${suffix}$`).exec(pathname);
+  if (!match) return undefined;
+  try { return decodeURIComponent(match[1]); } catch { return undefined; }
+}
+/** @param {string} pathname */
 function votePath(pathname) {
   const match = /^\/api\/posts\/([^/]+)\/vote$/.exec(pathname);
   if (!match) return undefined;
@@ -125,7 +141,7 @@ function isJsonContentType(contentType) { return typeof contentType === "string"
 export function createApp(options = {}) {
   const {
     database: injectedDatabase, now, randomToken, beforeMediaPersist, beforeCommentPersist,
-    beforeSavedPersist, beforeHistoryPersist, beforePreferencePersist, beforeVotePersist, beforeSearchRead, beforeFeedCommit, ...configOptions
+    beforeSavedPersist, beforeHistoryPersist, beforePreferencePersist, beforeVotePersist, beforeSearchRead, beforeFeedCommit, beforeModerationCommit, ...configOptions
   } = options;
   const config = createConfig(configOptions);
   const database = injectedDatabase || openDatabase(config.databasePath);
@@ -138,6 +154,7 @@ export function createApp(options = {}) {
   const voteRepository = new VoteRepository(database);
   const searchRepository = new SearchRepository(database);
   const feedRepository = new FeedRepository(database);
+  const moderationRepository = new ModerationRepository(database);
   const auth = new AuthService({ repository: authRepository, database, config, now, randomToken });
   const profiles = new ProfileService({ repository: profileRepository, database, now });
   const communities = new CommunityService({ repository: communityRepository, database, now });
@@ -147,6 +164,7 @@ export function createApp(options = {}) {
   const votes = new VoteService({ repository: voteRepository, database, beforeVotePersist });
   const search = new SearchService({ repository: searchRepository, beforeSearchRead });
   const feeds = new FeedService({ repository: feedRepository, database, now, beforeFeedCommit });
+  const moderation = new ModerationService({ repository: moderationRepository, database, now, randomToken, beforeModerationCommit });
   const ownDatabase = !injectedDatabase;
 
   /** @param {string} token @param {number} maxAgeSeconds */
@@ -166,6 +184,9 @@ export function createApp(options = {}) {
       const account = auth.resolve(token);
       const username = publicUsername(url.pathname);
       const isPublicUserRoute = /^\/api\/users\/[^/]+$/.test(url.pathname);
+
+      // Audit history is append-only; this explicit guard precedes any request-body handling.
+      if (method === "PATCH" && /^\/api\/mod\/audit\/[^/]+$/.test(url.pathname)) return json(405, methodNotAllowedError, { allow: "GET" });
 
       if (method === "GET" && url.pathname === "/api/search") {
         const query = validateSearch(url);
@@ -273,6 +294,48 @@ export function createApp(options = {}) {
         if (result.kind === "lost-authority") return json(401, authenticationError);
         return json(503, personalUnavailableError);
       }
+      if (method === "GET" && url.pathname === "/api/mod/queue") {
+        if (!account) return json(401, authenticationError);
+        const page = validateModerationQueuePage(url.searchParams);
+        if (!page) return json(422, invalidModerationQueuePageError);
+        const result = moderation.queue(account.id, page.limit, page.cursor);
+        if (result.kind === "success") return json(200, { reports: result.reports, nextCursor: result.nextCursor });
+        if (result.kind === "lost-authority") return json(401, authenticationError);
+        if (result.kind === "forbidden") return json(403, forbiddenError);
+        if (result.kind === "invalid-page") return json(422, invalidModerationQueuePageError);
+        return json(503, moderationUnavailableError, { "retry-after": "1" });
+      }
+      const reportPostId = reportPath(url.pathname);
+      if (reportPostId && method === "POST") {
+        if (!account) return json(401, authenticationError);
+        const result = moderation.report(account.id, reportPostId);
+        if (result.kind === "success") return json(201, result.report);
+        if (result.kind === "lost-authority") return json(401, authenticationError);
+        if (result.kind === "forbidden") return json(403, forbiddenError);
+        if (result.kind === "duplicate") return json(409, { error: "Report already exists" });
+        if (result.kind === "not-found") return json(404, notFoundError);
+        return json(503, moderationUnavailableError, { "retry-after": "1" });
+      }
+      const removePostId = moderationPostPath(url.pathname);
+      if (removePostId && method === "DELETE") {
+        if (!account) return json(401, authenticationError);
+        const result = moderation.transition(account.id, removePostId, "remove");
+        if (result.kind === "success") return empty(204);
+        if (result.kind === "lost-authority") return json(401, authenticationError);
+        if (result.kind === "forbidden") return json(403, forbiddenError);
+        if (result.kind === "not-found") return json(404, notFoundError);
+        return json(503, moderationUnavailableError, { "retry-after": "1" });
+      }
+      const restorePostId = moderationPostPath(url.pathname, "/restore");
+      if (restorePostId && method === "POST") {
+        if (!account) return json(401, authenticationError);
+        const result = moderation.transition(account.id, restorePostId, "restore");
+        if (result.kind === "success") return json(200, result.post);
+        if (result.kind === "lost-authority") return json(401, authenticationError);
+        if (result.kind === "forbidden") return json(403, forbiddenError);
+        if (result.kind === "not-found") return json(404, notFoundError);
+        return json(503, moderationUnavailableError, { "retry-after": "1" });
+      }
       const savePost = /^\/api\/posts\/([^/]+)\/save$/.exec(url.pathname);
       if (savePost && (method === "PUT" || method === "DELETE")) {
         if (!account) return json(401, authenticationError);
@@ -333,7 +396,7 @@ export function createApp(options = {}) {
         const result = communities.admitModlog(account.id, modlogCommunity);
         if (result.kind === "not-found") return json(404, notFoundError);
         if (result.kind === "forbidden") return json(403, forbiddenError);
-        return json(200, { entries: [] });
+        return json(200, { entries: moderation.modlog(modlogCommunity) });
       }
       const postCommunity = communityPath(url.pathname, "/posts");
       if (method === "POST" && postCommunity !== null) {

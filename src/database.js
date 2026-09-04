@@ -27,6 +27,7 @@ const commentMigration = migration("005-comments.sql");
 const voteMigration = migration("006-votes.sql");
 const personalMigration = migration("006-personal-state.sql");
 const feedMigration = migration("007-feeds.sql");
+const moderationMigration = migration("008-moderation.sql");
 
 /** @param {Database} database */
 function assertCommunityOwnerInvariant(database) {
@@ -252,6 +253,135 @@ function assertFeedInvariant(database) {
 }
 
 /** @param {Database} database */
+function assertModerationInvariant(database) {
+  const binary = "BINARY";
+  const fail = () => { throw new Error("moderation invariant is invalid"); };
+  /** @param {string} table @param {any[][]} expected */
+  const columnsMatch = (table, expected) => JSON.stringify(database.prepare(`PRAGMA table_info(${table})`).all()
+    .map((/** @type {any} */ column) => [column.name, column.type, column.notnull, column.dflt_value, column.pk])) === JSON.stringify(expected);
+  /** @param {string} table @param {string[][]} expected */
+  const foreignKeysMatch = (table, expected) => {
+    const actual = database.prepare(`PRAGMA foreign_key_list(${table})`).all()
+      .map((/** @type {any} */ key) => [key.from, key.table, key.to, key.on_update, key.on_delete, key.match]).sort();
+    return JSON.stringify(actual) === JSON.stringify([...expected].sort());
+  };
+  /** @param {string} table @param {[string, [string, number, string][]][]} expected */
+  const uniqueConstraintsMatch = (table, expected) => {
+    const actual = database.prepare(`PRAGMA index_list(${table})`).all()
+      .filter((/** @type {any} */ index) => index.unique === 1)
+      .map((/** @type {any} */ index) => [index.origin, database.prepare("SELECT name, desc, coll FROM pragma_index_xinfo(?) WHERE key = 1 ORDER BY seqno").all(index.name)
+        .map((/** @type {any} */ part) => [part.name, part.desc, part.coll])])
+      .sort((/** @type {any} */ left, /** @type {any} */ right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+    return JSON.stringify(actual) === JSON.stringify([...expected].sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))));
+  };
+  /** @param {string} table @param {string} name @param {number} unique @param {[string, number, string][]} columns */
+  const indexMatches = (table, name, unique, columns) => {
+    const index = database.prepare(`PRAGMA index_list(${table})`).all().find((/** @type {any} */ entry) => entry.name === name);
+    const actual = index && database.prepare("SELECT name, desc, coll FROM pragma_index_xinfo(?) WHERE key = 1 ORDER BY seqno").all(name)
+      .map((/** @type {any} */ part) => [part.name, part.desc, part.coll]);
+    return index?.unique === unique && index?.origin === "c" && JSON.stringify(actual) === JSON.stringify(columns);
+  };
+
+  const postState = database.prepare("PRAGMA table_info(posts)").all().find((/** @type {any} */ column) => column.name === "moderation_state");
+  const postsSql = normalizedSql(database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'posts'").get()?.sql || "");
+  if (postState?.type !== "TEXT" || postState.notnull !== 1 || postState.dflt_value !== "'active'" ||
+    !postsSql.includes("check (moderation_state in ('active', 'removed'))")) fail();
+
+  const expectedColumns = {
+    reports: [["id", "TEXT", 1, null, 1], ["occurrence_sequence", "INTEGER", 1, null, 0], ["post_id", "TEXT", 1, null, 0], ["community_name", "TEXT", 1, null, 0], ["reporter_user_id", "TEXT", 1, null, 0], ["reported_at", "INTEGER", 1, null, 0]],
+    moderation_audit_events: [["id", "TEXT", 1, null, 1], ["occurrence_sequence", "INTEGER", 1, null, 0], ["post_id", "TEXT", 1, null, 0], ["community_name", "TEXT", 1, null, 0], ["moderator_user_id", "TEXT", 1, null, 0], ["action", "TEXT", 1, null, 0], ["occurred_at", "INTEGER", 1, null, 0]],
+    moderation_queue_traversals: [["id", "TEXT", 1, null, 1], ["requester_user_id", "TEXT", 1, null, 0], ["authority_digest", "TEXT", 1, null, 0], ["created_at", "INTEGER", 1, null, 0], ["expires_at", "INTEGER", 1, null, 0]],
+    moderation_queue_items: [["traversal_id", "TEXT", 1, null, 1], ["ordinal", "INTEGER", 1, null, 2], ["report_id", "TEXT", 1, null, 0]],
+    moderation_queue_tokens: [["token", "TEXT", 1, null, 1], ["traversal_id", "TEXT", 1, null, 0], ["start_ordinal", "INTEGER", 1, null, 0]],
+  };
+  if (!Object.entries(expectedColumns).every(([table, expected]) => columnsMatch(table, expected))) fail();
+
+  const expectedTableSql = {
+    reports: `CREATE TABLE reports (
+      id TEXT PRIMARY KEY NOT NULL,
+      occurrence_sequence INTEGER NOT NULL UNIQUE CHECK (typeof(occurrence_sequence) = 'integer' AND occurrence_sequence > 0),
+      post_id TEXT NOT NULL,
+      community_name TEXT NOT NULL REFERENCES communities(canonical_name),
+      reporter_user_id TEXT NOT NULL REFERENCES users(id),
+      reported_at INTEGER NOT NULL CHECK (typeof(reported_at) = 'integer' AND reported_at >= 0),
+      UNIQUE (reporter_user_id, post_id)
+    )`,
+    moderation_audit_events: `CREATE TABLE moderation_audit_events (
+      id TEXT PRIMARY KEY NOT NULL,
+      occurrence_sequence INTEGER NOT NULL UNIQUE CHECK (typeof(occurrence_sequence) = 'integer' AND occurrence_sequence > 0),
+      post_id TEXT NOT NULL,
+      community_name TEXT NOT NULL REFERENCES communities(canonical_name),
+      moderator_user_id TEXT NOT NULL REFERENCES users(id),
+      action TEXT NOT NULL CHECK (action IN ('removed', 'restored')),
+      occurred_at INTEGER NOT NULL CHECK (typeof(occurred_at) = 'integer' AND occurred_at >= 0)
+    )`,
+    moderation_queue_traversals: `CREATE TABLE moderation_queue_traversals (
+      id TEXT PRIMARY KEY NOT NULL,
+      requester_user_id TEXT NOT NULL REFERENCES users(id),
+      authority_digest TEXT NOT NULL CHECK (length(authority_digest) = 64 AND authority_digest NOT GLOB '*[^0-9a-f]*'),
+      created_at INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at >= 0),
+      expires_at INTEGER NOT NULL CHECK (typeof(expires_at) = 'integer' AND expires_at > created_at)
+    )`,
+    moderation_queue_items: `CREATE TABLE moderation_queue_items (
+      traversal_id TEXT NOT NULL REFERENCES moderation_queue_traversals(id) ON DELETE CASCADE,
+      ordinal INTEGER NOT NULL CHECK (typeof(ordinal) = 'integer' AND ordinal >= 0),
+      report_id TEXT NOT NULL REFERENCES reports(id),
+      PRIMARY KEY (traversal_id, ordinal),
+      UNIQUE (traversal_id, report_id)
+    )`,
+    moderation_queue_tokens: `CREATE TABLE moderation_queue_tokens (
+      token TEXT PRIMARY KEY NOT NULL,
+      traversal_id TEXT NOT NULL REFERENCES moderation_queue_traversals(id) ON DELETE CASCADE,
+      start_ordinal INTEGER NOT NULL CHECK (typeof(start_ordinal) = 'integer' AND start_ordinal >= 0),
+      UNIQUE (traversal_id, start_ordinal)
+    )`,
+  };
+  if (!Object.entries(expectedTableSql).every(([name, expected]) => normalizedSql(database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?").get(name)?.sql || "") === normalizedSql(expected))) fail();
+
+  if (!foreignKeysMatch("reports", [["community_name", "communities", "canonical_name", "NO ACTION", "NO ACTION", "NONE"], ["reporter_user_id", "users", "id", "NO ACTION", "NO ACTION", "NONE"]]) ||
+    !foreignKeysMatch("moderation_audit_events", [["community_name", "communities", "canonical_name", "NO ACTION", "NO ACTION", "NONE"], ["moderator_user_id", "users", "id", "NO ACTION", "NO ACTION", "NONE"]]) ||
+    !foreignKeysMatch("moderation_queue_traversals", [["requester_user_id", "users", "id", "NO ACTION", "NO ACTION", "NONE"]]) ||
+    !foreignKeysMatch("moderation_queue_items", [["report_id", "reports", "id", "NO ACTION", "NO ACTION", "NONE"], ["traversal_id", "moderation_queue_traversals", "id", "NO ACTION", "CASCADE", "NONE"]]) ||
+    !foreignKeysMatch("moderation_queue_tokens", [["traversal_id", "moderation_queue_traversals", "id", "NO ACTION", "CASCADE", "NONE"]])) fail();
+
+  if (!uniqueConstraintsMatch("reports", [["pk", [["id", 0, binary]]], ["u", [["occurrence_sequence", 0, binary]]], ["u", [["reporter_user_id", 0, binary], ["post_id", 0, binary]]]]) ||
+    !uniqueConstraintsMatch("moderation_audit_events", [["pk", [["id", 0, binary]]], ["u", [["occurrence_sequence", 0, binary]]]]) ||
+    !uniqueConstraintsMatch("moderation_queue_traversals", [["pk", [["id", 0, binary]]]]) ||
+    !uniqueConstraintsMatch("moderation_queue_items", [["pk", [["traversal_id", 0, binary], ["ordinal", 0, binary]]], ["u", [["traversal_id", 0, binary], ["report_id", 0, binary]]]]) ||
+    !uniqueConstraintsMatch("moderation_queue_tokens", [["pk", [["token", 0, binary]]], ["u", [["traversal_id", 0, binary], ["start_ordinal", 0, binary]]]])) fail();
+
+  if (!indexMatches("reports", "reports_community_order", 0, [["community_name", 0, binary], ["occurrence_sequence", 0, binary], ["id", 0, binary]]) ||
+    !indexMatches("moderation_audit_events", "moderation_audit_community_order", 0, [["community_name", 0, binary], ["occurrence_sequence", 0, binary], ["id", 0, binary]]) ||
+    !indexMatches("moderation_queue_traversals", "moderation_queue_traversals_owner_snapshot", 0, [["requester_user_id", 0, binary], ["authority_digest", 0, binary]]) ||
+    !indexMatches("moderation_queue_traversals", "moderation_queue_traversals_expiry", 0, [["expires_at", 0, binary]])) fail();
+
+  const expectedTriggers = {
+    moderation_audit_events_are_immutable: "create trigger moderation_audit_events_are_immutable before update on moderation_audit_events begin select raise(abort, 'moderation audit event is immutable'); end",
+    moderation_audit_events_cannot_be_deleted: "create trigger moderation_audit_events_cannot_be_deleted before delete on moderation_audit_events begin select raise(abort, 'moderation audit event cannot be deleted'); end",
+    moderation_queue_traversals_are_immutable: "create trigger moderation_queue_traversals_are_immutable before update on moderation_queue_traversals begin select raise(abort, 'moderation queue traversal is immutable'); end",
+    moderation_queue_items_are_immutable: "create trigger moderation_queue_items_are_immutable before update on moderation_queue_items begin select raise(abort, 'moderation queue item is immutable'); end",
+    moderation_queue_tokens_are_immutable: "create trigger moderation_queue_tokens_are_immutable before update on moderation_queue_tokens begin select raise(abort, 'moderation queue token is immutable'); end",
+  };
+  if (!Object.entries(expectedTriggers).every(([name, expected]) => normalizedSql(database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = ?").get(name)?.sql || "") === normalizedSql(expected))) fail();
+  const expectedView = "create view readable_posts as select * from posts where moderation_state = 'active'";
+  if (normalizedSql(database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'view' AND name = 'readable_posts'").get()?.sql || "") !== expectedView) fail();
+
+  const invalid = database.prepare(`SELECT 1 FROM posts WHERE typeof(moderation_state) <> 'text' OR moderation_state NOT IN ('active', 'removed')
+    UNION ALL SELECT 1 FROM reports WHERE occurrence_sequence < 1 OR typeof(occurrence_sequence) <> 'integer' OR reported_at < 0 OR typeof(reported_at) <> 'integer'
+    UNION ALL SELECT 1 FROM moderation_audit_events WHERE action NOT IN ('removed', 'restored') OR occurrence_sequence < 1 OR typeof(occurrence_sequence) <> 'integer' OR occurred_at < 0 OR typeof(occurred_at) <> 'integer'
+    UNION ALL SELECT 1 FROM moderation_queue_traversals WHERE length(authority_digest) <> 64 OR authority_digest GLOB '*[^0-9a-f]*' OR typeof(created_at) <> 'integer' OR created_at < 0 OR typeof(expires_at) <> 'integer' OR expires_at <= created_at
+    UNION ALL SELECT 1 FROM moderation_queue_items WHERE ordinal < 0 OR typeof(ordinal) <> 'integer'
+    UNION ALL SELECT 1 FROM moderation_queue_tokens WHERE start_ordinal < 0 OR typeof(start_ordinal) <> 'integer'
+    UNION ALL SELECT 1 FROM (SELECT occurrence_sequence FROM reports GROUP BY occurrence_sequence HAVING COUNT(*) > 1)
+    UNION ALL SELECT 1 FROM (SELECT reporter_user_id, post_id FROM reports GROUP BY reporter_user_id, post_id HAVING COUNT(*) > 1)
+    UNION ALL SELECT 1 FROM (SELECT occurrence_sequence FROM moderation_audit_events GROUP BY occurrence_sequence HAVING COUNT(*) > 1)
+    UNION ALL SELECT 1 FROM (SELECT traversal_id, report_id FROM moderation_queue_items GROUP BY traversal_id, report_id HAVING COUNT(*) > 1)
+    UNION ALL SELECT 1 FROM (SELECT traversal_id, start_ordinal FROM moderation_queue_tokens GROUP BY traversal_id, start_ordinal HAVING COUNT(*) > 1)
+    LIMIT 1`).get();
+  if (invalid || database.prepare("PRAGMA foreign_key_check").get()) fail();
+}
+
+/** @param {Database} database */
 function assertVoteInvariant(database) {
   const voteColumns = /** @type {{name: string, type: string, notnull: number, pk: number}[]} */ (database.prepare("PRAGMA table_info(post_votes)").all());
   const expectedColumns = [
@@ -319,7 +449,7 @@ export function openDatabase(path) {
   try {
     database.exec("PRAGMA foreign_keys = ON; BEGIN IMMEDIATE");
     const version = /** @type {{user_version: number}} */ (database.prepare("PRAGMA user_version").get()).user_version;
-    if (version > 8) throw new Error("Unsupported database schema version");
+    if (version > 9) throw new Error("Unsupported database schema version");
     if (version === 0) {
       database.exec(baselineMigration);
       database.exec("PRAGMA user_version = 1");
@@ -358,12 +488,17 @@ export function openDatabase(path) {
       database.exec(feedMigration);
       database.exec("PRAGMA user_version = 8");
     }
+    if (version <= 8) {
+      database.exec(moderationMigration);
+      database.exec("PRAGMA user_version = 9");
+    }
     assertCommunityOwnerInvariant(database);
     assertPostInvariant(database);
     assertCommentInvariant(database);
     assertVoteInvariant(database);
     assertPersonalInvariant(database);
     assertFeedInvariant(database);
+    assertModerationInvariant(database);
     database.exec("COMMIT");
     return database;
   } catch (error) {

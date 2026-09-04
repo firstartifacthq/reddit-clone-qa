@@ -290,6 +290,30 @@ test("SCN-RC-06-H6 serializes duplicate and mixed same-actor concurrent mutation
   });
 });
 
+test("moderation removal and restoration gate vote resources, mutations, and aggregates", async () => {
+  await withApp(async ({ app, request }) => {
+    const { owner, post } = await postOwner(request, "moderated-vote-owner");
+    const second = await (await jsonRequest(request, "/api/communities/voting/posts", "POST", { type: "text", title: "Still readable", text: "body" }, owner.cookie)).json();
+    const voter = await signup(request, "moderated-voter");
+    assert.equal((await jsonRequest(request, votePath(post), "PUT", { value: 1 }, voter.cookie)).statusCode, 200);
+    assert.equal((await jsonRequest(request, votePath(second), "PUT", { value: 1 }, voter.cookie)).statusCode, 200);
+    assert.equal((await (await request(votePath(second), { headers: { cookie: voter.cookie } })).json()).authorKarma, 2);
+    assert.equal((await request(`/api/mod/posts/${post.id}`, { method: "DELETE", headers: { cookie: owner.cookie } })).statusCode, 204);
+    const before = voteRows(app);
+    await fixedError(await request(votePath(post), { headers: { cookie: voter.cookie } }), 404, "Not found");
+    await fixedError(await jsonRequest(request, votePath(post), "PUT", { value: -1 }, voter.cookie), 404, "Not found");
+    await fixedError(await request(votePath(post), { method: "DELETE", headers: { cookie: voter.cookie } }), 404, "Not found");
+    assert.deepEqual(voteRows(app), before, "removed vote attempts preserve the ledger");
+    assert.equal((await (await request(votePath(second), { headers: { cookie: voter.cookie } })).json()).authorKarma, 1, "removed posts do not contribute to readable aggregates");
+
+    assert.equal((await request(`/api/mod/posts/${post.id}/restore`, { method: "POST", headers: { cookie: owner.cookie } })).statusCode, 200);
+    assert.deepEqual(await (await request(votePath(post), { headers: { cookie: voter.cookie } })).json(), { postId: post.id, value: 1, score: 1, authorKarma: 2 });
+    assert.equal((await jsonRequest(request, votePath(post), "PUT", { value: -1 }, voter.cookie)).statusCode, 200);
+    assert.equal((await request(votePath(post), { method: "DELETE", headers: { cookie: voter.cookie } })).statusCode, 204);
+    assert.deepEqual(await (await request(votePath(post), { headers: { cookie: voter.cookie } })).json(), { postId: post.id, value: null, score: 0, authorKarma: 1 });
+  });
+});
+
 test("SCN-RC-06-H7 rejects only invalid admitted PUT grammar and leaves ledger paths unknown", async () => {
   await withApp(async ({ app, request }) => {
     const { post } = await postOwner(request);

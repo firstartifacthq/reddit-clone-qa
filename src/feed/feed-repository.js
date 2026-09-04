@@ -5,7 +5,7 @@ export class FeedRepository {
   constructor(database) {
     this.activeUser = database.prepare("SELECT 1 FROM users WHERE id = ? AND deletion_requested_at IS NULL");
     this.community = database.prepare("SELECT 1 FROM communities WHERE canonical_name = ?");
-    const readable = `FROM posts JOIN users ON users.id = posts.author_user_id AND users.deletion_requested_at IS NULL
+    const readable = `FROM readable_posts AS posts JOIN users ON users.id = posts.author_user_id AND users.deletion_requested_at IS NULL
       JOIN communities ON communities.canonical_name = posts.community_name`;
     this.homeCandidates = database.prepare(`SELECT posts.*, users.username, COALESCE(SUM(post_votes.value), 0) AS score ${readable}
       JOIN community_memberships AS membership ON membership.community_name = posts.community_name AND membership.user_id = ?
@@ -26,12 +26,12 @@ export class FeedRepository {
       WHERE token.token = ? AND traversal.feed_kind = ? AND traversal.community_name IS ?
         AND traversal.requester_user_id IS ? AND traversal.expires_at > ?`);
     this.page = database.prepare(`SELECT item.ordinal, posts.*, users.username FROM feed_traversal_items AS item
-      JOIN posts ON posts.id = item.post_id
+      JOIN readable_posts AS posts ON posts.id = item.post_id
       JOIN users ON users.id = posts.author_user_id AND users.deletion_requested_at IS NULL
       JOIN communities ON communities.canonical_name = posts.community_name
       WHERE item.traversal_id = ? AND item.ordinal >= ? ORDER BY item.ordinal LIMIT ?`);
     this.more = database.prepare(`SELECT 1 FROM feed_traversal_items AS item
-      JOIN posts ON posts.id = item.post_id
+      JOIN readable_posts AS posts ON posts.id = item.post_id
       JOIN users ON users.id = posts.author_user_id AND users.deletion_requested_at IS NULL
       JOIN communities ON communities.canonical_name = posts.community_name
       WHERE item.traversal_id = ? AND item.ordinal >= ? LIMIT 1`);

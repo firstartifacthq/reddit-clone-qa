@@ -154,6 +154,22 @@ test("SCN-RC-08-H6 maps an injected retrieval outage to retryable recovery", asy
   }, { beforeSearchRead: () => { if (fail) { fail = false; throw new Error("search-fault-marker"); } } });
 });
 
+test("moderation removal and restoration gate post and comment search", async () => {
+  await withApp(async ({ app, request }) => {
+    const { owner, post, comment } = await setup(request);
+    assert.deepEqual((await (await request("/api/search?q=needle")).json()).results.map((entry) => entry.type), ["community", "post", "comment"]);
+    assert.equal((await request(`/api/mod/posts/${post.id}`, { method: "DELETE", headers: { cookie: owner.cookie } })).statusCode, 204);
+    const removed = await (await request("/api/search?q=needle")).json();
+    assert.deepEqual(removed.results.map((entry) => entry.type), ["community"]);
+    assert.equal(JSON.stringify(removed).includes(post.id), false); assert.equal(JSON.stringify(removed).includes(comment.id), false);
+    const beforeChanges = changes(app); assert.equal((await request("/api/search?q=needle&type=comment")).statusCode, 200); assert.equal(changes(app), beforeChanges);
+    assert.equal((await request(`/api/mod/posts/${post.id}/restore`, { method: "POST", headers: { cookie: owner.cookie } })).statusCode, 200);
+    const restored = await (await request("/api/search?q=needle")).json();
+    assert.deepEqual(restored.results.map((entry) => entry.type), ["community", "post", "comment"]);
+    assert.equal(restored.results.some((entry) => entry.id === post.id), true); assert.equal(restored.results.some((entry) => entry.id === comment.id), true);
+  });
+});
+
 test("SCN-RC-08-H7 omits deleted content and search creates no durable user state", async () => {
   await withApp(async ({ app, request }) => {
     const { owner, post, comment } = await setup(request);

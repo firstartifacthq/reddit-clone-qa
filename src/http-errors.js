@@ -21,3 +21,6 @@ export const invalidSearchError = Object.freeze({ error: "Invalid search" });
 export const searchUnavailableError = Object.freeze({ error: "Search unavailable" });
 export const invalidFeedPageError = Object.freeze({ error: "Invalid feed page" });
 export const feedUnavailableError = Object.freeze({ error: "Feed unavailable" });
+export const invalidModerationQueuePageError = Object.freeze({ error: "Invalid moderation queue page" });
+export const moderationUnavailableError = Object.freeze({ error: "Moderation unavailable" });
+export const methodNotAllowedError = Object.freeze({ error: "Method not allowed" });
