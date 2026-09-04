@@ -294,6 +294,33 @@ test("SCN-RC-07-H6 rolls back feed failures and retries cleanly", async () => {
   });
 });
 
+test("moderation removal and restoration gate fresh and retained feed pages", async () => withApp(async ({ app, request, tick }) => {
+  const owner = await user(request, "moderated-feed-owner"); await community(request, owner, "moderatedfeed");
+  const entries = [];
+  for (let index = 0; index < 4; index += 1) { entries.push(await post(request, owner, "moderatedfeed", `moderated-feed-${index}`)); tick(); }
+  const ordered = entries.map((entry) => entry.id).reverse(); const target = ordered[1];
+  const contexts = [
+    ["/api/feed/home?limit=1", owner.cookie], ["/api/feed/popular?limit=1", undefined], ["/api/communities/moderatedfeed/feed?limit=1", undefined],
+  ];
+  const snapshots = [];
+  for (const [route, auth] of contexts) snapshots.push(await bodyOf(await feed(request, route, auth)));
+  assert.equal((await request(`/api/mod/posts/${target}`, { method: "DELETE", headers: { cookie: owner.cookie } })).statusCode, 204);
+  for (const [index, snapshot] of snapshots.entries()) {
+    const resumedRoute = `${contexts[index][0].replace("limit=1", "limit=100")}&cursor=${snapshot.nextCursor}`;
+    const resumed = await bodyOf(await feed(request, resumedRoute, contexts[index][1]));
+    assert.deepEqual(ids(resumed), ordered.slice(2));
+  }
+  for (const [route, auth] of contexts) assert.equal(ids(await bodyOf(await feed(request, route.replace("limit=1", "limit=100"), auth))).includes(target), false);
+  assert.equal((await request(`/api/mod/posts/${target}/restore`, { method: "POST", headers: { cookie: owner.cookie } })).statusCode, 200);
+  for (const [index, snapshot] of snapshots.entries()) {
+    const resumedRoute = `${contexts[index][0].replace("limit=1", "limit=100")}&cursor=${snapshot.nextCursor}`;
+    const resumed = await bodyOf(await feed(request, resumedRoute, contexts[index][1]));
+    assert.deepEqual(ids(resumed), ordered.slice(1), "restoration re-enables retained snapshot identity");
+  }
+  for (const [route, auth] of contexts) assert.equal(ids(await bodyOf(await feed(request, route.replace("limit=1", "limit=100"), auth))).includes(target), true);
+  assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM posts WHERE id = ?").get(target).count, 1);
+}));
+
 test("SCN-RC-07-H7 filters deleted snapshot posts from resumed pages", async () => withApp(async ({ app, request, tick }) => {
   const owner = await user(request, "delete-owner");
   await community(request, owner, "deletefeed");

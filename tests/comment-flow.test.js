@@ -124,6 +124,32 @@ test("SCN-RC-05-H6 cursor retries resume immutable snapshots", async () => {
   });
 });
 
+test("moderation removal and restoration gate every comment read and mutation path", async () => {
+  await withApp(async ({ app, request }) => {
+    const { owner, post } = await setup(request); const route = `/api/posts/${post.id}/comments`;
+    const comments = [];
+    for (const body of ["first", "second", "third"]) comments.push(await (await send(request, route, "POST", { body }, owner.cookie)).json());
+    const firstPage = await (await request(`${route}?limit=1`)).json(); assert.ok(firstPage.nextCursor);
+    assert.equal((await request(`/api/mod/posts/${post.id}`, { method: "DELETE", headers: { cookie: owner.cookie } })).statusCode, 204);
+    const before = app.database.prepare("SELECT id, body, state FROM comments WHERE post_id = ? ORDER BY created_sequence").all(post.id).map((row) => ({ ...row }));
+    await fixed(await request(route), 404, "Not found");
+    await fixed(await request(`${route}?limit=1&cursor=${firstPage.nextCursor}`), 404, "Not found");
+    await fixed(await send(request, route, "POST", { body: "must-not-persist" }, owner.cookie), 404, "Not found", ["must-not-persist"]);
+    await fixed(await request(`/api/comments/${comments[1].id}`), 404, "Not found", ["second"]);
+    await fixed(await send(request, `/api/comments/${comments[1].id}`, "PATCH", { body: "must-not-edit" }, owner.cookie), 404, "Not found", ["must-not-edit"]);
+    await fixed(await request(`/api/comments/${comments[1].id}`, { method: "DELETE", headers: { cookie: owner.cookie } }), 404, "Not found");
+    assert.deepEqual(app.database.prepare("SELECT id, body, state FROM comments WHERE post_id = ? ORDER BY created_sequence").all(post.id).map((row) => ({ ...row })), before);
+
+    assert.equal((await request(`/api/mod/posts/${post.id}/restore`, { method: "POST", headers: { cookie: owner.cookie } })).statusCode, 200);
+    assert.deepEqual((await (await request(route)).json()).comments.map((entry) => entry.id), comments.map((entry) => entry.id));
+    assert.equal((await (await request(`${route}?cursor=${firstPage.nextCursor}`)).json()).comments.some((entry) => entry.id === comments[1].id), true);
+    assert.equal((await request(`/api/comments/${comments[1].id}`)).statusCode, 200);
+    assert.equal((await send(request, `/api/comments/${comments[1].id}`, "PATCH", { body: "restored-edit" }, owner.cookie)).statusCode, 200);
+    assert.equal((await send(request, route, "POST", { body: "restored-create" }, owner.cookie)).statusCode, 201);
+    assert.equal((await request(`/api/comments/${comments[2].id}`, { method: "DELETE", headers: { cookie: owner.cookie } })).statusCode, 204);
+  });
+});
+
 test("SCN-RC-05-H7 never discloses deleted bodies or authors", async () => {
   await withApp(async ({ app, request }) => {
     const { owner, post } = await setup(request); const marker = "deleted-body-marker";

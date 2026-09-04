@@ -82,6 +82,37 @@ test("SCN-RC-12-H6 rolls back full preference patches before retry", async () =>
   const user = await owner(request); const patch = { theme: "dark", compactMode: true }; await fixed(await send(request, "/api/me/preferences", "PATCH", patch, user.cookie), 503, { error: "Personal state unavailable" }); assert.deepEqual(await (await request("/api/me/preferences", { headers: { cookie: user.cookie } })).json(), { theme: "system", compactMode: false }); assert.deepEqual(await (await send(request, "/api/me/preferences", "PATCH", patch, user.cookie)).json(), patch);
 }, { beforePreferencePersist: () => { if (fail) { fail = false; throw new Error("fault"); } } }); });
 
+test("moderation removal and restoration gate saved, history, resumed pages, and view writes", async () => { await withApp(async ({ app, request }) => {
+  const user = await owner(request, "moderated-personal-owner"); const values = [];
+  for (const title of ["moderated one", "moderated two", "moderated three"]) {
+    const value = await post(request, user, title); values.push(value);
+    assert.equal((await send(request, `/api/posts/${value.id}/save`, "PUT", undefined, user.cookie)).statusCode, 204);
+    assert.equal((await request(`/api/posts/${value.id}`, { headers: { cookie: user.cookie } })).statusCode, 200);
+  }
+  const savedOrder = (await (await request("/api/me/saved", { headers: { cookie: user.cookie } })).json()).posts.map((entry) => entry.id);
+  const target = savedOrder[1];
+  const savedPage = await (await request("/api/me/saved?limit=1", { headers: { cookie: user.cookie } })).json();
+  const historyPage = await (await request("/api/me/history?limit=1", { headers: { cookie: user.cookie } })).json();
+  assert.ok(savedPage.nextCursor); assert.ok(historyPage.nextCursor);
+  assert.equal((await request(`/api/mod/posts/${target}`, { method: "DELETE", headers: { cookie: user.cookie } })).statusCode, 204);
+  const privateRows = { saved: app.database.prepare("SELECT COUNT(*) AS count FROM saved_posts").get().count, history: app.database.prepare("SELECT COUNT(*) AS count FROM post_history").get().count };
+  assert.equal((await (await request("/api/me/saved", { headers: { cookie: user.cookie } })).json()).posts.some((entry) => entry.id === target), false);
+  assert.equal((await (await request("/api/me/history", { headers: { cookie: user.cookie } })).json()).history.some((entry) => entry.post.id === target), false);
+  assert.equal((await (await request(`/api/me/saved?cursor=${savedPage.nextCursor}`, { headers: { cookie: user.cookie } })).json()).posts.some((entry) => entry.id === target), false);
+  assert.equal((await (await request(`/api/me/history?cursor=${historyPage.nextCursor}`, { headers: { cookie: user.cookie } })).json()).history.some((entry) => entry.post.id === target), false);
+  await fixed(await request(`/api/posts/${target}`, { headers: { cookie: user.cookie } }), 404, { error: "Not found" });
+  await fixed(await send(request, `/api/posts/${target}/save`, "PUT", undefined, user.cookie), 404, { error: "Not found" });
+  assert.deepEqual({ saved: app.database.prepare("SELECT COUNT(*) AS count FROM saved_posts").get().count, history: app.database.prepare("SELECT COUNT(*) AS count FROM post_history").get().count }, privateRows);
+
+  assert.equal((await request(`/api/mod/posts/${target}/restore`, { method: "POST", headers: { cookie: user.cookie } })).statusCode, 200);
+  assert.equal((await (await request("/api/me/saved", { headers: { cookie: user.cookie } })).json()).posts.some((entry) => entry.id === target), true);
+  assert.equal((await (await request("/api/me/history", { headers: { cookie: user.cookie } })).json()).history.some((entry) => entry.post.id === target), true);
+  assert.equal((await (await request(`/api/me/saved?cursor=${savedPage.nextCursor}`, { headers: { cookie: user.cookie } })).json()).posts.some((entry) => entry.id === target), true);
+  assert.equal((await (await request(`/api/me/history?cursor=${historyPage.nextCursor}`, { headers: { cookie: user.cookie } })).json()).history.some((entry) => entry.post.id === target), true);
+  assert.equal((await request(`/api/posts/${target}`, { headers: { cookie: user.cookie } })).statusCode, 200);
+  assert.deepEqual({ saved: app.database.prepare("SELECT COUNT(*) AS count FROM saved_posts").get().count, history: app.database.prepare("SELECT COUNT(*) AS count FROM post_history").get().count }, privateRows);
+}); });
+
 test("SCN-RC-12-H7 post deletion cascades private state and future saves fail", async () => { await withApp(async ({ app, request }) => {
   const user = await owner(request); const value = await post(request, user); const route = `/api/posts/${value.id}/save`; assert.equal((await send(request, route, "PUT", undefined, user.cookie)).statusCode, 204); assert.equal((await request(`/api/posts/${value.id}`, { headers: { cookie: user.cookie } })).statusCode, 200); assert.equal((await request(`/api/posts/${value.id}`, { method: "DELETE", headers: { cookie: user.cookie } })).statusCode, 204);
   assert.deepEqual(await (await request("/api/me/saved", { headers: { cookie: user.cookie } })).json(), { posts: [], nextCursor: null }); assert.deepEqual(await (await request("/api/me/history", { headers: { cookie: user.cookie } })).json(), { history: [], nextCursor: null }); await fixed(await send(request, route, "PUT", undefined, user.cookie), 404, { error: "Not found" }); assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM saved_posts UNION ALL SELECT COUNT(*) FROM post_history").all().every((row) => row.count === 0), true);

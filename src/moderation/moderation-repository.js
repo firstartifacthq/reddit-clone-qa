@@ -25,6 +25,7 @@ export class ModerationRepository {
     this.queueCandidates = database.prepare(`SELECT reports.* FROM reports JOIN community_memberships AS membership
       ON membership.community_name = reports.community_name JOIN users ON users.id = membership.user_id AND users.deletion_requested_at IS NULL
       WHERE membership.user_id = ? AND membership.role IN ('owner', 'moderator') ORDER BY reports.occurrence_sequence, reports.id`);
+    this.deleteExpiredTraversals = database.prepare("DELETE FROM moderation_queue_traversals WHERE expires_at <= ?");
     this.insertTraversal = database.prepare(`INSERT INTO moderation_queue_traversals
       (id, requester_user_id, authority_digest, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`);
     this.insertItem = database.prepare("INSERT INTO moderation_queue_items (traversal_id, ordinal, report_id) VALUES (?, ?, ?)");
@@ -53,6 +54,7 @@ export class ModerationRepository {
   /** @param {{id: string, postId: string, community: string, reporterId: string, reportedAt: number}} report */
   createReport(report) { this.insertReport.run(report.id, this.nextReportSequence.get().value, report.postId, report.community, report.reporterId, report.reportedAt); return this.reportById.get(report.id); }
   /** @param {string} userId */ queueFor(userId) { return this.queueCandidates.all(userId); }
+  /** @param {number} now */ reclaimExpiredTraversals(now) { this.deleteExpiredTraversals.run(now); }
   /** @param {string} id @param {string} requesterId @param {string} digest @param {number} createdAt @param {number} expiresAt @param {{id: string}[]} rows */
   createTraversal(id, requesterId, digest, createdAt, expiresAt, rows) { this.insertTraversal.run(id, requesterId, digest, createdAt, expiresAt); rows.forEach((row, ordinal) => this.insertItem.run(id, ordinal, row.id)); }
   /** @param {string} token @param {string} requesterId @param {string} digest @param {number} now */ tokenFor(token, requesterId, digest, now) { return this.token.get(token, requesterId, digest, now); }

@@ -33,7 +33,7 @@ CREATE TABLE moderation_queue_traversals (
   created_at INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at >= 0),
   expires_at INTEGER NOT NULL CHECK (typeof(expires_at) = 'integer' AND expires_at > created_at)
 );
-CREATE UNIQUE INDEX moderation_queue_traversals_owner_snapshot ON moderation_queue_traversals(requester_user_id, authority_digest);
+CREATE INDEX moderation_queue_traversals_owner_snapshot ON moderation_queue_traversals(requester_user_id, authority_digest);
 CREATE INDEX moderation_queue_traversals_expiry ON moderation_queue_traversals(expires_at);
 
 CREATE TABLE moderation_queue_items (

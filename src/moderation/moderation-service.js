@@ -45,8 +45,10 @@ export class ModerationService {
       if (cursor) {
         const token = this.repository.tokenFor(cursor, userId, digest, now);
         if (!token) { rollback(this.database); return { kind: "invalid-page" }; }
+        this.repository.reclaimExpiredTraversals(now);
         traversalId = token.traversal_id; start = token.start_ordinal;
       } else {
+        this.repository.reclaimExpiredTraversals(now);
         const reports = this.repository.queueFor(userId);
         if (reports.length <= limit) { this.database.exec("COMMIT"); return { kind: "success", reports: reports.map(reportRepresentation), nextCursor: null }; }
         traversalId = randomUUID(); start = 0;

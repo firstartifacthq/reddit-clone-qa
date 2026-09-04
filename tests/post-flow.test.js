@@ -285,6 +285,27 @@ test("SCN-RC-04-H6 rolls back media faults and idempotent retries converge", asy
   }, { beforeMediaPersist: () => { if (!failed) { failed = true; throw new Error("internal-media-failure-marker"); } } });
 });
 
+test("moderation removal and restoration gate direct post and media reads", async () => {
+  await withApp(async ({ app, request }) => {
+    const owner = await member(request, "moderated-media-owner");
+    const bytes = pngBytes("moderated-media-marker");
+    const created = await requestJson(request, "/api/communities/posting/posts", "POST", {
+      type: "media", title: "Moderated media", media: { filename: "moderated.png", contentType: "image/png", bytesBase64: bytes.toString("base64") },
+    }, owner.cookie);
+    const post = await created.json(); const route = `/api/posts/${post.id}`;
+    assert.equal((await request(`${route}/media`)).statusCode, 200);
+    assert.equal((await request(`/api/mod/posts/${post.id}`, { method: "DELETE", headers: { cookie: owner.cookie } })).statusCode, 204);
+    await assertFixedError(await request(route), 404, { error: "Not found" }, [post.id, "Moderated media"]);
+    await assertFixedError(await request(`${route}/media`), 404, { error: "Not found" }, [post.id, "moderated-media-marker"]);
+    assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM posts WHERE id = ?").get(post.id).count, 1, "removal retains the canonical post");
+    const restored = await request(`/api/mod/posts/${post.id}/restore`, { method: "POST", headers: { cookie: owner.cookie } });
+    assert.equal(restored.statusCode, 200); assert.deepEqual(await restored.json(), post);
+    assert.deepEqual(await (await request(route)).json(), post);
+    assert.deepEqual(Buffer.from(await (await request(`${route}/media`)).bytes()), bytes);
+    assert.deepEqual(app.database.prepare("SELECT action FROM moderation_audit_events WHERE post_id = ? ORDER BY occurrence_sequence").all(post.id).map((row) => row.action), ["removed", "restored"]);
+  });
+});
+
 test("SCN-RC-04-H7 uses fixed non-disclosing errors for every unreadable outcome", async () => {
   let failMedia = true;
   await withApp(async ({ app, request }) => {

@@ -9,7 +9,7 @@ const password = "correct-horse-battery";
 async function withApp(run, options = {}) {
   const directory = await mkdtemp(join(tmpdir(), "reddit-moderation-")); const path = join(directory, "moderation.sqlite");
   let time = 1_700_000_000_000; const app = createApp({ databasePath: path, now: () => time, ...options });
-  try { await run({ app, path, tick: () => { time += 1; }, request: (route, requestOptions = {}) => app.inject({ path: route, ...requestOptions }) }); }
+  try { await run({ app, path, tick: (delta = 1) => { time += delta; }, request: (route, requestOptions = {}) => app.inject({ path: route, ...requestOptions }) }); }
   finally { try { app.close(); } catch {} await rm(directory, { recursive: true, force: true }); }
 }
 function cookie(response) { const value = response.headers.get("set-cookie"); assert.ok(value); return value.split(";", 1)[0]; }
@@ -42,6 +42,43 @@ test("SCN-RC-09-H2 snapshots only authorized report queues in deterministic opaq
   const thirdPage = await request(`/api/mod/queue?limit=1&cursor=${(await secondPage.json()).nextCursor}`, { headers: { cookie: owner.cookie } }); const seen = [...firstBody.reports, ...(await replay.json()).reports, ...(await thirdPage.json()).reports].map((entry) => entry.id); assert.equal(new Set(seen).size, 3); assert.equal(JSON.stringify(seen).includes("never-disclose-queue-marker"), false);
   const before = counts(app.database); const denied = await request(`/api/mod/queue?cursor=${firstBody.nextCursor}`, { headers: { cookie: outsider.cookie } }); assert.equal(denied.statusCode, 422); assert.deepEqual(counts(app.database), before, "cross-account cursor has no write effect");
 }));
+
+test("moderation queue fresh snapshots, dropped retries, expiry cleanup, and reopen remain bounded", async () => {
+  const ttl = 24 * 60 * 60 * 1_000;
+  await withApp(async ({ app, path, request, tick }) => {
+    const { owner, member, post } = await setup(request);
+    const second = await createPost(request, owner, "modqueue", "second snapshot report");
+    const third = await createPost(request, owner, "modqueue", "third snapshot report");
+    for (const value of [post, second, third]) assert.equal((await report(request, member, value)).statusCode, 201);
+
+    const first = await request("/api/mod/queue?limit=1", { headers: { cookie: owner.cookie } });
+    const firstBody = await first.json(); assert.equal(first.statusCode, 200); assert.ok(firstBody.nextCursor);
+    const droppedResponseRetry = await request("/api/mod/queue?limit=1", { headers: { cookie: owner.cookie } });
+    assert.equal(droppedResponseRetry.statusCode, 200); assert.deepEqual((await droppedResponseRetry.json()).reports, firstBody.reports);
+    assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM moderation_queue_traversals").get().count, 2, "fresh reads get independent traversals");
+
+    const later = await createPost(request, owner, "modqueue", "newly committed report");
+    assert.equal((await report(request, member, later)).statusCode, 201);
+    const fresh = await request("/api/mod/queue?limit=10", { headers: { cookie: owner.cookie } });
+    assert.equal(fresh.statusCode, 200); assert.equal((await fresh.json()).reports.some((entry) => entry.postId === later.id), true);
+
+    app.close();
+    const reopened = createApp({ databasePath: path, now: () => 1_700_000_000_000, sessionLifetimeMs: 2 * ttl });
+    assert.equal((await reopened.inject({ path: `/api/mod/queue?limit=1&cursor=${firstBody.nextCursor}`, headers: { cookie: owner.cookie } })).statusCode, 200, "cursor survives reopen");
+    reopened.close();
+
+    const afterReopen = createApp({ databasePath: path, now: () => 1_700_000_000_000 + ttl + 1, sessionLifetimeMs: 2 * ttl });
+    const reclaimed = await afterReopen.inject({ path: "/api/mod/queue?limit=1", headers: { cookie: owner.cookie } });
+    assert.equal(reclaimed.statusCode, 200);
+    assert.deepEqual({ ...afterReopen.database.prepare(`SELECT
+      (SELECT COUNT(*) FROM moderation_queue_traversals) AS traversals,
+      (SELECT COUNT(*) FROM moderation_queue_items) AS items,
+      (SELECT COUNT(*) FROM moderation_queue_tokens) AS tokens`).get() }, { traversals: 1, items: 4, tokens: 1 });
+    assert.equal((await afterReopen.inject({ path: `/api/mod/queue?cursor=${firstBody.nextCursor}`, headers: { cookie: owner.cookie } })).statusCode, 422, "expired cursor is invalid after cascade reclamation");
+    afterReopen.close();
+    tick(ttl + 1);
+  }, { sessionLifetimeMs: 2 * ttl });
+});
 
 test("SCN-RC-09-H3 enforces database report uniqueness without queue amplification", async () => withApp(async ({ app, request }) => { const { owner, member, post } = await setup(request); assert.equal((await report(request, member, post)).statusCode, 201); const first = await request("/api/mod/queue?limit=1", { headers: { cookie: owner.cookie } }); const before = counts(app.database); const changes = app.database.prepare("SELECT total_changes() AS count").get().count; const response = await report(request, member, post); assert.equal(response.statusCode, 409); assert.deepEqual(counts(app.database), before); assert.equal(app.database.prepare("SELECT total_changes() AS count").get().count, changes); assert.deepEqual((await first.json()).reports.map((entry) => entry.postId), [post.id]); }));
 
