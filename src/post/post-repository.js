@@ -10,8 +10,8 @@ export class PostRepository {
     this.postingMember = database.prepare(`SELECT 1 FROM community_memberships AS membership
       JOIN users ON users.id = membership.user_id AND users.deletion_requested_at IS NULL
       WHERE membership.community_name = ? AND membership.user_id = ?`);
-    this.postById = database.prepare(`SELECT posts.*, users.username FROM posts JOIN users ON users.id = posts.author_user_id WHERE posts.id = ?`);
-    this.mediaById = database.prepare("SELECT media_content_type, media_bytes FROM posts WHERE id = ? AND type = 'media'");
+    this.postById = database.prepare(`SELECT posts.*, users.username FROM readable_posts AS posts JOIN users ON users.id = posts.author_user_id WHERE posts.id = ?`);
+    this.mediaById = database.prepare("SELECT media_content_type, media_bytes FROM readable_posts WHERE id = ? AND type = 'media'");
     this.idempotencyByKey = database.prepare("SELECT body_digest, response_json FROM post_idempotency WHERE author_user_id = ? AND community_name = ? AND idempotency_key = ?");
     this.insertPost = database.prepare(`INSERT INTO posts (id, community_name, author_user_id, type, title, text_content, url_content, media_filename, media_content_type, media_bytes, published_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);

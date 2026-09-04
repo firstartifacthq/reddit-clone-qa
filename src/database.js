@@ -27,6 +27,7 @@ const commentMigration = migration("005-comments.sql");
 const voteMigration = migration("006-votes.sql");
 const personalMigration = migration("006-personal-state.sql");
 const feedMigration = migration("007-feeds.sql");
+const moderationMigration = migration("008-moderation.sql");
 
 /** @param {Database} database */
 function assertCommunityOwnerInvariant(database) {
@@ -252,6 +253,23 @@ function assertFeedInvariant(database) {
 }
 
 /** @param {Database} database */
+function assertModerationInvariant(database) {
+  const postState = database.prepare("PRAGMA table_info(posts)").all().find((/** @type {any} */ column) => column.name === "moderation_state");
+  const requiredTables = ["reports", "moderation_audit_events", "moderation_queue_traversals", "moderation_queue_items", "moderation_queue_tokens"];
+  const tablesPresent = requiredTables.every((name) => Boolean(database.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?").get(name)));
+  const view = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'view' AND name = 'readable_posts'").get()?.sql || "";
+  const triggers = ["moderation_audit_events_are_immutable", "moderation_audit_events_cannot_be_deleted", "moderation_queue_traversals_are_immutable", "moderation_queue_items_are_immutable", "moderation_queue_tokens_are_immutable"];
+  const triggersPresent = triggers.every((name) => Boolean(database.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'trigger' AND name = ?").get(name)));
+  const invalid = tablesPresent && database.prepare(`SELECT 1 FROM posts WHERE moderation_state NOT IN ('active', 'removed')
+    UNION ALL SELECT 1 FROM reports WHERE occurrence_sequence < 1 OR typeof(occurrence_sequence) <> 'integer' OR reported_at < 0 OR typeof(reported_at) <> 'integer'
+    UNION ALL SELECT 1 FROM moderation_audit_events WHERE action NOT IN ('removed', 'restored') OR occurrence_sequence < 1 OR typeof(occurrence_sequence) <> 'integer' OR occurred_at < 0 OR typeof(occurred_at) <> 'integer'
+    UNION ALL SELECT 1 FROM moderation_queue_items WHERE ordinal < 0 OR typeof(ordinal) <> 'integer'
+    UNION ALL SELECT 1 FROM moderation_queue_tokens WHERE start_ordinal < 0 OR typeof(start_ordinal) <> 'integer' LIMIT 1`).get();
+  if (postState?.type !== "TEXT" || postState.notnull !== 1 || postState.dflt_value !== "'active'" || !/moderation_state\s+in\s*\(\s*'active'\s*,\s*'removed'\s*\)/i.test(database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'posts'").get()?.sql || "") ||
+    !tablesPresent || !/select \* from posts where moderation_state = 'active'/i.test(view) || !triggersPresent || invalid || database.prepare("PRAGMA foreign_key_check").get()) throw new Error("moderation invariant is invalid");
+}
+
+/** @param {Database} database */
 function assertVoteInvariant(database) {
   const voteColumns = /** @type {{name: string, type: string, notnull: number, pk: number}[]} */ (database.prepare("PRAGMA table_info(post_votes)").all());
   const expectedColumns = [
@@ -319,7 +337,7 @@ export function openDatabase(path) {
   try {
     database.exec("PRAGMA foreign_keys = ON; BEGIN IMMEDIATE");
     const version = /** @type {{user_version: number}} */ (database.prepare("PRAGMA user_version").get()).user_version;
-    if (version > 8) throw new Error("Unsupported database schema version");
+    if (version > 9) throw new Error("Unsupported database schema version");
     if (version === 0) {
       database.exec(baselineMigration);
       database.exec("PRAGMA user_version = 1");
@@ -358,12 +376,17 @@ export function openDatabase(path) {
       database.exec(feedMigration);
       database.exec("PRAGMA user_version = 8");
     }
+    if (version <= 8) {
+      database.exec(moderationMigration);
+      database.exec("PRAGMA user_version = 9");
+    }
     assertCommunityOwnerInvariant(database);
     assertPostInvariant(database);
     assertCommentInvariant(database);
     assertVoteInvariant(database);
     assertPersonalInvariant(database);
     assertFeedInvariant(database);
+    assertModerationInvariant(database);
     database.exec("COMMIT");
     return database;
   } catch (error) {

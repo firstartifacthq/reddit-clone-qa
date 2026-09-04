@@ -35,6 +35,10 @@ Optional non-secret configuration is captured when the application starts:
 - `DELETE /api/communities/:canonicalName/members/me`
 - `PATCH /api/communities/:canonicalName/moderators`
 - `GET /api/communities/:canonicalName/modlog`
+- `GET /api/mod/queue?limit=:limit&cursor=:cursor`
+- `DELETE /api/mod/posts/:id`
+- `POST /api/mod/posts/:id/restore`
+- `POST /api/posts/:id/reports`
 - `POST /api/communities/:canonicalName/posts`
 - `GET`, `PATCH`, and `DELETE /api/posts/:id`
 - `GET`, `PUT`, and `DELETE /api/posts/:id/vote`
@@ -62,5 +66,7 @@ Authenticated active users can save a readable post and retrieve their saved pos
 `GET /api/search` accepts exactly one non-empty, trimmed `q` and an optional `type` of `community`, `post`, or `comment`. It returns `{ "results": [] }` or deterministic communities, posts, and active comments using type-specific fields. Invalid search input returns HTTP 400 `{ "error": "Invalid search" }`; a transient search read failure returns HTTP 503 `{ "error": "Search unavailable" }` with `Retry-After: 1`. Search reads canonical current state and does not record post-view history or create other user state.
 
 `GET /api/feed/home`, `GET /api/feed/popular`, and `GET /api/communities/:canonicalName/feed` return `{ "posts": [...], "nextCursor": string | null }`. Home requires an active session and scopes posts to current memberships; Popular and a community feed include only currently readable canonical posts. Home and community feeds order by publication time descending, score descending, then post ID ascending. Popular orders by score descending, publication time descending, then post ID ascending. `limit` defaults to 25 and accepts canonical values from 1 through 100. Cursors are opaque, expire after 24 hours, and retain their issued order while fresh reads use current memberships and votes. Invalid pages return HTTP 422 `{ "error": "Invalid feed page" }`; transient feed reads return HTTP 503 `{ "error": "Feed unavailable" }` with `Retry-After: 1`.
+
+Active members may report a currently readable post in a community they have joined. A member can create only one durable report for each post. Current community owners and moderators can read their responsible reports through opaque, deterministic queue cursors, remove a reported or unreported post, and restore a removed post. Removal hides the post from ordinary post, media, feed, search, comment, personal, and vote surfaces without deleting it; restoration exposes the original post again. Each successful state transition appends an immutable ordered entry to that community's modlog. Audit rewrite requests are rejected with HTTP 405.
 
 Run `npm run typecheck`, `npm test`, and `npm run build` before submitting changes.

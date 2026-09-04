@@ -8,7 +8,7 @@ export class VoteRepository {
   /** @param {Database} database */
   constructor(database) {
     // Admission intentionally excludes vote state and aggregates from denied paths.
-    this.target = database.prepare(`SELECT author_user_id, voting_state FROM posts
+    this.target = database.prepare(`SELECT author_user_id, voting_state FROM readable_posts AS posts
       JOIN users ON users.id = posts.author_user_id AND users.deletion_requested_at IS NULL
       WHERE posts.id = ?`);
     this.current = database.prepare("SELECT value FROM post_votes WHERE post_id = ? AND voter_user_id = ?");
@@ -18,10 +18,10 @@ export class VoteRepository {
     this.resource = database.prepare(`SELECT posts.id AS post_id,
       (SELECT value FROM post_votes WHERE post_id = posts.id AND voter_user_id = ?) AS value,
       COALESCE((SELECT SUM(value) FROM post_votes WHERE post_id = posts.id), 0) AS score,
-      COALESCE((SELECT SUM(vote.value) FROM posts AS authored
+      COALESCE((SELECT SUM(vote.value) FROM readable_posts AS authored
         JOIN post_votes AS vote ON vote.post_id = authored.id
         WHERE authored.author_user_id = posts.author_user_id), 0) AS author_karma
-      FROM posts JOIN users ON users.id = posts.author_user_id AND users.deletion_requested_at IS NULL
+      FROM readable_posts AS posts JOIN users ON users.id = posts.author_user_id AND users.deletion_requested_at IS NULL
       WHERE posts.id = ?`);
   }
 
