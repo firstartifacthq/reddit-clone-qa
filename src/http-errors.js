@@ -9,6 +9,7 @@ export const profileUnavailableError = Object.freeze({ error: "Profile service u
 export const invalidPostError = Object.freeze({ error: "Invalid post" });
 export const postConflictError = Object.freeze({ error: "Post conflict" });
 export const postUnavailableError = Object.freeze({ error: "Post service unavailable" });
+export const postRateLimitedError = Object.freeze({ error: "Post creation rate limited" });
 export const invalidCommentError = Object.freeze({ error: "Invalid comment" });
 export const invalidCommentPageError = Object.freeze({ error: "Invalid comment page" });
 export const commentUnavailableError = Object.freeze({ error: "Comment service unavailable" });

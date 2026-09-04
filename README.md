@@ -16,6 +16,8 @@ Optional non-secret configuration is captured when the application starts:
 - `SESSION_LIFETIME_MS` (default one hour)
 - `SESSION_COOKIE_NAME` (default `reddit_session`)
 - `NODE_ENV=production` enables the cookie `Secure` attribute
+- `POST_RATE_LIMIT_MAX` (default `100` valid creations)
+- `POST_RATE_LIMIT_WINDOW_MS` (default `60000`, accepted range `1` through `2592000000` milliseconds; creation facts are retained for that 30-day maximum)
 
 ## HTTP surface
 
@@ -28,6 +30,7 @@ Optional non-secret configuration is captured when the application starts:
 - `GET /api/me/history`
 - `PUT`, `DELETE /api/posts/:id/save`
 - `GET /api/users/:username`
+- `POST /api/users/:username/block`
 - `GET /api/communities`
 - `GET /api/search?q=:query[&type=community|post|comment]`
 - `POST /api/communities`
@@ -55,7 +58,9 @@ A successful `DELETE /api/me` marks the account deletion-requested and revokes e
 
 Authenticated active users can create a community with a 3 through 21 character ASCII letter, digit, or underscore name. Names are ASCII-trimmed and case-folded for uniqueness. Creation makes the creator the immutable owner; joining is idempotent, non-owners can leave, and only the owner can promote or demote an existing active member. The public list contains canonical community names in deterministic order.
 
-Current members can publish JSON text, HTTP(S) link, or image media posts. Media uploads use canonical base64 in the JSON request and are stored with their metadata in the local SQLite database; media reads return the accepted bytes with their declared image content type. Post creation accepts an optional `Idempotency-Key` for safe retries. Only the author can edit declared-form fields or delete a post.
+Current members can publish JSON text, HTTP(S) link, or image media posts. Display strings reject executable markup and script-capable URI content before persistence. Media uploads use canonical base64 in the JSON request and are stored with their metadata in the local SQLite database; media reads return the accepted bytes with their declared image content type. Post creation accepts an optional `Idempotency-Key` for safe retries and is limited per active user by the configured creation window; exhausted capacity returns HTTP 429 with `Retry-After`. Only the author can edit declared-form fields or delete a post.
+
+An authenticated active user may `POST /api/users/:username/block` to add another active account to that user's personal block list. The action is idempotent. A blocked account receives the same HTTP 404 response as an unknown post when retrieving a post authored by its blocker; no post-view history is recorded for that denied read.
 
 Authenticated active users can set or replace their own vote as JSON `{ "value": 1 }` or `{ "value": -1 }` on another active author's unlocked post, inspect their current vote, or clear it. Vote score and author karma are derived from current durable votes; no vote ledger or aggregate override route is exposed.
 
