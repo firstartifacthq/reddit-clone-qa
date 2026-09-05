@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -41,6 +41,168 @@ test("AC-RC13-6 acceptance effects roll back together when interrupted before co
   assert.equal((await app.inject({ method: "GET", path: "/api/me", headers: { cookie: owner.cookie } })).statusCode, 200);
   assert.equal(work.length, 1, "only the startup drain was scheduled");
   app.close();
+});
+
+test("MC-RC13-003 deletion acceptance rollback preserves every durable effect before persistent retry", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "reddit-privacy-acceptance-"));
+  const databasePath = join(directory, "privacy.sqlite");
+  try {
+    let interruptAcceptance = false;
+    let scheduled = [];
+    let app = createApp({
+      databasePath,
+      schedulePrivacyWork: (run) => scheduled.push(run),
+      beforePrivacyAcceptance: () => { if (interruptAcceptance) throw new Error("deletion acceptance interrupted"); },
+    });
+    const owner = await signup(app, "deletion-rollback");
+    const secondLogin = await app.inject({
+      method: "POST",
+      path: "/api/auth/login",
+      payload: JSON.stringify({ username: "deletion-rollback", password: "privacy-pass-123" }),
+    });
+    const secondCookie = secondLogin.headers.get("set-cookie").split(";", 1)[0];
+    const exportResponse = await app.inject({ method: "POST", path: "/api/me/export", headers: { cookie: owner.cookie } });
+    const exportJob = await exportResponse.json();
+    scheduled.at(-1)();
+    const payloadBefore = app.database.prepare("SELECT payload_json FROM privacy_export_payloads WHERE job_id=?").get(exportJob.jobId).payload_json;
+    assert.deepEqual(actions(app.database, exportJob.jobId), ["accepted", "completed"]);
+
+    interruptAcceptance = true;
+    const interrupted = await app.inject({ method: "DELETE", path: "/api/me", headers: { cookie: owner.cookie } });
+    assert.equal(interrupted.statusCode, 503);
+    assert.equal(app.database.prepare("SELECT deletion_requested_at FROM users WHERE id=?").get(owner.account.id).deletion_requested_at, null);
+    assert.deepEqual(app.database.prepare("SELECT revoked_at FROM sessions WHERE user_id=? ORDER BY issued_at").all(owner.account.id).map((row) => row.revoked_at), [null, null]);
+    assert.equal(app.database.prepare("SELECT payload_json FROM privacy_export_payloads WHERE job_id=?").get(exportJob.jobId).payload_json, payloadBefore);
+    assert.deepEqual(actions(app.database, exportJob.jobId), ["accepted", "completed"]);
+    assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM privacy_jobs WHERE operation='deletion'").get().count, 0);
+    assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM privacy_deletion_progress").get().count, 0);
+    assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM privacy_job_events").get().count, 2);
+    assert.equal((await app.inject({ method: "GET", path: "/api/me", headers: { cookie: owner.cookie } })).statusCode, 200);
+    assert.equal((await app.inject({ method: "GET", path: "/api/me", headers: { cookie: secondCookie } })).statusCode, 200);
+    app.close();
+
+    // Reopening proves the rollback, not live connection state, is authoritative.
+    scheduled = [];
+    app = createApp({ databasePath, schedulePrivacyWork: (run) => scheduled.push(run) });
+    assert.equal(app.database.prepare("SELECT deletion_requested_at FROM users WHERE id=?").get(owner.account.id).deletion_requested_at, null);
+    assert.deepEqual(actions(app.database, exportJob.jobId), ["accepted", "completed"]);
+    assert.equal(app.database.prepare("SELECT payload_json FROM privacy_export_payloads WHERE job_id=?").get(exportJob.jobId).payload_json, payloadBefore);
+    const retried = await app.inject({ method: "DELETE", path: "/api/me", headers: { cookie: secondCookie } });
+    const deletionJob = await retried.json();
+    assert.equal(retried.statusCode, 202);
+    assert.equal(deletionJob.state, "pending");
+    assert.equal(app.database.prepare("SELECT deletion_requested_at IS NOT NULL AS restricted FROM users WHERE id=?").get(owner.account.id).restricted, 1);
+    assert.deepEqual(app.database.prepare("SELECT revoked_at IS NOT NULL AS revoked FROM sessions WHERE user_id=? ORDER BY issued_at").all(owner.account.id).map((row) => row.revoked), [1, 1]);
+    assert.deepEqual(actions(app.database, exportJob.jobId), ["accepted", "completed", "revoked"]);
+    assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM privacy_export_payloads WHERE job_id=?").get(exportJob.jobId).count, 0);
+    assert.deepEqual(actions(app.database, deletionJob.jobId), ["accepted"]);
+    assert.equal(app.database.prepare("SELECT phase FROM privacy_deletion_progress WHERE job_id=?").get(deletionJob.jobId).phase, "accepted");
+    app.close();
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("MC-RC13-003 interrupted export resumes its original durable snapshot exactly once after reopen", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "reddit-privacy-export-resume-"));
+  const databasePath = join(directory, "privacy.sqlite");
+  try {
+    let scheduled = [];
+    let app = createApp({
+      databasePath,
+      schedulePrivacyWork: (run) => scheduled.push(run),
+      beforePrivacyPhase: (job) => { if (job.operation === "export") throw new Error("export processing interrupted"); },
+    });
+    const owner = await signup(app, "persistent-export");
+    await app.inject({ method: "PATCH", path: "/api/me", headers: { cookie: owner.cookie }, payload: JSON.stringify({ bio: "accepted-snapshot-canary" }) });
+    const accepted = await app.inject({ method: "POST", path: "/api/me/export", headers: { cookie: owner.cookie } });
+    const job = await accepted.json();
+    assert.equal(accepted.statusCode, 202);
+    const acceptedPayload = app.database.prepare("SELECT payload_json FROM privacy_export_payloads WHERE job_id=?").get(job.jobId).payload_json;
+    scheduled.at(-1)();
+    assert.deepEqual(actions(app.database, job.jobId), ["accepted"]);
+    assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM privacy_export_payloads WHERE job_id=?").get(job.jobId).count, 1);
+    app.close();
+
+    scheduled = [];
+    app = createApp({ databasePath, schedulePrivacyWork: (run) => scheduled.push(run) });
+    const pending = await app.inject({ method: "GET", path: `/api/me/export/jobs/${job.jobId}`, headers: { cookie: owner.cookie } });
+    assert.deepEqual(await pending.json(), { jobId: job.jobId, operation: "export", state: "pending" });
+    assert.equal(app.database.prepare("SELECT payload_json FROM privacy_export_payloads WHERE job_id=?").get(job.jobId).payload_json, acceptedPayload);
+    scheduled.at(-1)();
+    assert.deepEqual(actions(app.database, job.jobId), ["accepted", "completed"]);
+    assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM privacy_export_payloads WHERE job_id=? AND payload_json=?").get(job.jobId, acceptedPayload).count, 1);
+    const completed = await app.inject({ method: "GET", path: `/api/me/export/jobs/${job.jobId}/result`, headers: { cookie: owner.cookie } });
+    assert.equal(completed.statusCode, 200);
+    assert.equal((await completed.json()).account.bio, "accepted-snapshot-canary");
+    scheduled.at(-1)();
+    assert.deepEqual(actions(app.database, job.jobId), ["accepted", "completed"]);
+    app.close();
+
+    scheduled = [];
+    app = createApp({ databasePath, schedulePrivacyWork: (run) => scheduled.push(run) });
+    scheduled.at(-1)();
+    assert.deepEqual(actions(app.database, job.jobId), ["accepted", "completed"]);
+    assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM privacy_export_payloads WHERE job_id=? AND payload_json=?").get(job.jobId, acceptedPayload).count, 1);
+    app.close();
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("MC-RC13-003 stale export delivery cannot resurrect a revoked export before or after persistent erasure", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "reddit-privacy-no-resurrection-"));
+  const databasePath = join(directory, "privacy.sqlite");
+  const canary = "stale-export-erasure-canary";
+  try {
+    let holdDeletion = true;
+    let scheduled = [];
+    let app = createApp({
+      databasePath,
+      schedulePrivacyWork: (run) => scheduled.push(run),
+      beforePrivacyPhase: (job) => { if (holdDeletion && job.operation === "deletion") throw new Error("hold deletion pending"); },
+    });
+    const owner = await signup(app, canary);
+    const acceptedExport = await app.inject({ method: "POST", path: "/api/me/export", headers: { cookie: owner.cookie } });
+    const exportJob = await acceptedExport.json();
+    const staleExportDelivery = scheduled.at(-1);
+    assert.deepEqual(actions(app.database, exportJob.jobId), ["accepted"]);
+
+    const acceptedDeletion = await app.inject({ method: "DELETE", path: "/api/me", headers: { cookie: owner.cookie } });
+    const deletionJob = await acceptedDeletion.json();
+    const deletionDelivery = scheduled.at(-1);
+    assert.equal(acceptedDeletion.statusCode, 202);
+    assert.deepEqual(actions(app.database, exportJob.jobId), ["accepted", "revoked"]);
+    assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM privacy_export_payloads WHERE job_id=?").get(exportJob.jobId).count, 0);
+
+    staleExportDelivery();
+    staleExportDelivery();
+    assert.deepEqual(actions(app.database, exportJob.jobId), ["accepted", "revoked"]);
+    assert.deepEqual(actions(app.database, deletionJob.jobId), ["accepted"]);
+    assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM privacy_export_payloads WHERE job_id=?").get(exportJob.jobId).count, 0);
+
+    holdDeletion = false;
+    deletionDelivery();
+    assert.deepEqual(actions(app.database, deletionJob.jobId), ["accepted", "completed"]);
+    assert.deepEqual(actions(app.database, exportJob.jobId), ["accepted", "revoked"]);
+    assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM privacy_job_events WHERE job_id=? AND action='completed'").get(exportJob.jobId).count, 0);
+    assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM privacy_export_payloads WHERE job_id=?").get(exportJob.jobId).count, 0);
+    assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM users WHERE id=?").get(owner.account.id).count, 0);
+    staleExportDelivery();
+    deletionDelivery();
+    assert.deepEqual(actions(app.database, exportJob.jobId), ["accepted", "revoked"]);
+    assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM privacy_export_payloads WHERE job_id=?").get(exportJob.jobId).count, 0);
+    app.close();
+
+    // Closed callbacks and a fresh startup drain both remain harmless, and the compacted
+    // artifact no longer contains the snapshot's erased identity canary.
+    staleExportDelivery();
+    assert.equal((await readFile(databasePath)).includes(Buffer.from(canary)), false);
+    scheduled = [];
+    app = createApp({ databasePath, schedulePrivacyWork: (run) => scheduled.push(run) });
+    scheduled.at(-1)();
+    assert.deepEqual(actions(app.database, exportJob.jobId), ["accepted", "revoked"]);
+    assert.deepEqual(actions(app.database, deletionJob.jobId), ["accepted", "completed"]);
+    assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM privacy_export_payloads WHERE job_id=?").get(exportJob.jobId).count, 0);
+    assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM users WHERE id=?").get(owner.account.id).count, 0);
+    app.close();
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test("MC-RC13-001 deletion resumes after row erasure and interrupted compaction without completing early", async () => {
