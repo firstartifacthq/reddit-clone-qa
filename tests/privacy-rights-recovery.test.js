@@ -43,6 +43,97 @@ test("AC-RC13-6 acceptance effects roll back together when interrupted before co
   app.close();
 });
 
+test("AC-RC13-6A pre-commit failure has no partial acceptance and lost-response retries resolve the committed jobs", async () => {
+  const work = [];
+  const administrators = new Set();
+  let interruptAcceptance = false;
+  const app = createApp({
+    databasePath: ":memory:",
+    administratorAuthority: (account) => administrators.has(account.id),
+    schedulePrivacyWork: (run) => work.push(run),
+    beforePrivacyAcceptance: () => {
+      if (interruptAcceptance) throw new Error("acceptance interrupted");
+    },
+  });
+  const admin = await signup(app, "recovery-admin");
+  administrators.add(admin.account.id);
+  const exportOwner = await signup(app, "recovery-export");
+
+  interruptAcceptance = true;
+  const rejectedExport = await app.inject({ method: "POST", path: "/api/me/export", headers: { cookie: exportOwner.cookie } });
+  assert.equal(rejectedExport.statusCode, 503);
+  assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM privacy_jobs").get().count, 0);
+  assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM privacy_job_events").get().count, 0);
+  assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM privacy_export_payloads").get().count, 0);
+  assert.equal((await app.inject({ method: "GET", path: "/api/me", headers: { cookie: exportOwner.cookie } })).statusCode, 200);
+
+  interruptAcceptance = false;
+  const acceptedExport = await app.inject({ method: "POST", path: "/api/me/export", headers: { cookie: exportOwner.cookie } });
+  const exportJob = await acceptedExport.json();
+  assert.equal(acceptedExport.statusCode, 202);
+  // Treat the first committed response as lost. Repeating the request must resolve the durable pending job.
+  const repeatedExport = await app.inject({ method: "POST", path: "/api/me/export", headers: { cookie: exportOwner.cookie } });
+  assert.equal(repeatedExport.statusCode, 202);
+  assert.deepEqual(await repeatedExport.json(), exportJob);
+  assert.deepEqual(actions(app.database, exportJob.jobId), ["accepted"]);
+  assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM privacy_export_payloads WHERE job_id=?").get(exportJob.jobId).count, 1);
+
+  const deletionTarget = await signup(app, "recovery-delete");
+  const secondLogin = await app.inject({
+    method: "POST",
+    path: "/api/auth/login",
+    payload: JSON.stringify({ username: "recovery-delete", password: "privacy-pass-123" }),
+  });
+  const secondCookie = secondLogin.headers.get("set-cookie").split(";", 1)[0];
+  const acceptedTargetExport = await app.inject({ method: "POST", path: "/api/me/export", headers: { cookie: deletionTarget.cookie } });
+  const targetExportJob = await acceptedTargetExport.json();
+  const targetPayload = app.database.prepare("SELECT payload_json FROM privacy_export_payloads WHERE job_id=?").get(targetExportJob.jobId).payload_json;
+  const eventsBeforeDeletion = app.database.prepare("SELECT COUNT(*) AS count FROM privacy_job_events").get().count;
+
+  interruptAcceptance = true;
+  const rejectedDeletion = await app.inject({
+    method: "POST",
+    path: "/api/admin/users/delete",
+    headers: { cookie: admin.cookie },
+    payload: JSON.stringify({ userId: deletionTarget.account.id }),
+  });
+  assert.equal(rejectedDeletion.statusCode, 503);
+  assert.equal(app.database.prepare("SELECT deletion_requested_at FROM users WHERE id=?").get(deletionTarget.account.id).deletion_requested_at, null);
+  assert.deepEqual(app.database.prepare("SELECT revoked_at FROM sessions WHERE user_id=? ORDER BY rowid").all(deletionTarget.account.id).map((row) => row.revoked_at), [null, null]);
+  assert.deepEqual(actions(app.database, targetExportJob.jobId), ["accepted"]);
+  assert.equal(app.database.prepare("SELECT payload_json FROM privacy_export_payloads WHERE job_id=?").get(targetExportJob.jobId).payload_json, targetPayload);
+  assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM privacy_jobs WHERE operation='deletion'").get().count, 0);
+  assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM privacy_deletion_progress").get().count, 0);
+  assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM privacy_job_events").get().count, eventsBeforeDeletion);
+  assert.equal((await app.inject({ method: "GET", path: "/api/me", headers: { cookie: deletionTarget.cookie } })).statusCode, 200);
+  assert.equal((await app.inject({ method: "GET", path: "/api/me", headers: { cookie: secondCookie } })).statusCode, 200);
+
+  interruptAcceptance = false;
+  const acceptedDeletion = await app.inject({
+    method: "POST",
+    path: "/api/admin/users/delete",
+    headers: { cookie: admin.cookie },
+    payload: JSON.stringify({ userId: deletionTarget.account.id }),
+  });
+  const deletionJob = await acceptedDeletion.json();
+  assert.equal(acceptedDeletion.statusCode, 202);
+  // The committed administrative response is now considered lost as well.
+  const repeatedDeletion = await app.inject({
+    method: "POST",
+    path: "/api/admin/users/delete",
+    headers: { cookie: admin.cookie },
+    payload: JSON.stringify({ userId: deletionTarget.account.id }),
+  });
+  assert.equal(repeatedDeletion.statusCode, 202);
+  assert.deepEqual(await repeatedDeletion.json(), deletionJob);
+  assert.deepEqual(actions(app.database, targetExportJob.jobId), ["accepted", "revoked"]);
+  assert.deepEqual(actions(app.database, deletionJob.jobId), ["accepted"]);
+  assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM privacy_export_payloads WHERE job_id=?").get(targetExportJob.jobId).count, 0);
+  assert.equal(app.database.prepare("SELECT COUNT(*) AS count FROM privacy_deletion_progress WHERE job_id=? AND phase='accepted'").get(deletionJob.jobId).count, 1);
+  assert.equal(work.length, 4, "only startup and the three effective acceptances schedule work");
+  app.close();
+});
+
 test("MC-RC13-003 deletion acceptance rollback preserves every durable effect before persistent retry", async () => {
   const directory = await mkdtemp(join(tmpdir(), "reddit-privacy-acceptance-"));
   const databasePath = join(directory, "privacy.sqlite");

@@ -13,9 +13,9 @@ export class PrivacyService {
   accept(subject, operation) {
     try {
       this.database.exec("BEGIN IMMEDIATE");
-      if (!this.repository.active(subject)) { rollback(this.database); return { kind: "lost-authority" }; }
       const prior = this.repository.pendingFor(subject, operation);
       if (prior) { this.database.exec("COMMIT"); return { kind: "success", job: jobRepresentation(prior), existing: true }; }
+      if (!this.repository.active(subject)) { rollback(this.database); return { kind: "lost-authority" }; }
       const jobId = this.identifier();
       this.repository.create(jobId, operation, subject, this.now());
       if (operation === "export") this.repository.storePayload(jobId, this.repository.exportSnapshot(subject));
