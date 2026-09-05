@@ -1,0 +1,4 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { createApp } from "../src/app.js";
+test("AC-RC13-1A snapshots exclude authentication credentials", async () => { const tasks=[]; const app=createApp({databasePath:":memory:", schedulePrivacyWork:(f)=>tasks.push(f)}); const signup=await app.inject({method:"POST",path:"/api/auth/signup",payload:JSON.stringify({username:"exporter",password:"privacy-pass-123"})}); const cookie=signup.headers.get("set-cookie").split(";")[0]; const accepted=await app.inject({method:"POST",path:"/api/me/export",headers:{cookie}}); const job=await accepted.json(); tasks.at(-1)(); const result=await app.inject({method:"GET",path:`/api/me/export/jobs/${job.jobId}/result`,headers:{cookie}}); const body=await result.text(); assert.equal(result.statusCode,200); assert.equal(body.includes("password_verifier"),false); assert.equal(body.includes("token_digest"),false); app.close(); });

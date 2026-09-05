@@ -19,7 +19,7 @@ export class AuthRepository {
       FROM sessions JOIN users ON users.id = sessions.user_id
       WHERE sessions.token_digest = ? AND users.deletion_requested_at IS NULL`);
     this.revokeSession = database.prepare("UPDATE sessions SET revoked_at = ? WHERE token_digest = ? AND revoked_at IS NULL");
-    this.countUsers = database.prepare("SELECT COUNT(*) AS count FROM users");
+    this.countUsers = database.prepare("SELECT COUNT(*) AS count FROM users WHERE id <> '__privacy_tombstone__'");
   }
 
   /** @param {NewUser} user */

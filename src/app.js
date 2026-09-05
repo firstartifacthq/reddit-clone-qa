@@ -43,9 +43,13 @@ import {
   invalidNotificationPageError, invalidNotificationError, notificationUnavailableError, notificationNotFoundError,
 } from "./http-errors.js";
 import { renderShell } from "./public-shell.js";
+import { PrivacyRepository } from "./privacy/privacy-repository.js";
+import { PrivacyService } from "./privacy/privacy-service.js";
+import { PrivacyWorker } from "./privacy/privacy-worker.js";
+import { auditPage, deletionTarget, opaqueId, selfRequest } from "./privacy/privacy-validation.js";
 
 /** @typedef {{exec: (sql: string) => void, prepare: (sql: string) => any, close: () => void}} Database */
-/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, postRateLimitMax?: number, postRateLimitWindowMs?: number, now?: () => number, randomToken?: () => string, beforeMediaPersist?: () => void, beforePostEnforcement?: () => void, beforeCommentPersist?: () => void, beforeSavedPersist?: () => void, beforeHistoryPersist?: () => void, beforePreferencePersist?: () => void, beforeVotePersist?: () => void, beforeSearchRead?: () => void, beforeFeedCommit?: () => void, beforeModerationCommit?: () => void, beforeNotificationDelivery?: () => void}} AppOptions */
+/** @typedef {{database?: Database, databasePath?: string, port?: number, sessionLifetimeMs?: number, cookieName?: string, secureCookies?: boolean, postRateLimitMax?: number, postRateLimitWindowMs?: number, administratorIds?: Set<string>, now?: () => number, randomToken?: () => string, identifier?: () => string, administratorAuthority?: (account: {id:string, username:string}) => boolean, schedulePrivacyWork?: (work: () => void) => void, beforePrivacyAcceptance?: () => void, beforePrivacyPhase?: (job: any) => void, beforeMediaPersist?: () => void, beforePostEnforcement?: () => void, beforeCommentPersist?: () => void, beforeSavedPersist?: () => void, beforeHistoryPersist?: () => void, beforePreferencePersist?: () => void, beforeVotePersist?: () => void, beforeSearchRead?: () => void, beforeFeedCommit?: () => void, beforeModerationCommit?: () => void, beforeNotificationDelivery?: () => void}} AppOptions */
 /** @typedef {Record<string, string | string[] | undefined>} RequestHeaders */
 /** @typedef {{method?: string, path?: string, headers?: RequestHeaders, payload?: string | Uint8Array}} AppRequest */
 /** @typedef {{status: number, headers: Record<string, string>, body: string | Uint8Array}} AppResponse */
@@ -157,7 +161,8 @@ function isJsonContentType(contentType) { return typeof contentType === "string"
 export function createApp(options = {}) {
   const {
     database: injectedDatabase, now, randomToken, beforeMediaPersist, beforePostEnforcement, beforeCommentPersist,
-    beforeSavedPersist, beforeHistoryPersist, beforePreferencePersist, beforeVotePersist, beforeSearchRead, beforeFeedCommit, beforeModerationCommit, beforeNotificationDelivery, ...configOptions
+    beforeSavedPersist, beforeHistoryPersist, beforePreferencePersist, beforeVotePersist, beforeSearchRead, beforeFeedCommit, beforeModerationCommit, beforeNotificationDelivery,
+    identifier, administratorAuthority, schedulePrivacyWork, beforePrivacyAcceptance, beforePrivacyPhase, ...configOptions
   } = options;
   const config = createConfig(configOptions);
   const database = injectedDatabase || openDatabase(config.databasePath);
@@ -185,6 +190,12 @@ export function createApp(options = {}) {
   const search = new SearchService({ repository: searchRepository, beforeSearchRead });
   const feeds = new FeedService({ repository: feedRepository, database, now, beforeFeedCommit });
   const moderation = new ModerationService({ repository: moderationRepository, notificationService: notifications, database, now, randomToken, beforeModerationCommit });
+  const privacyRepository = new PrivacyRepository(database);
+  const privacy = new PrivacyService({ repository: privacyRepository, database, now, identifier, beforeAcceptance: beforePrivacyAcceptance });
+  const privacyWorker = new PrivacyWorker({ service: privacy, repository: privacyRepository, beforePhase: beforePrivacyPhase });
+  const isAdministrator = administratorAuthority || ((candidate) => config.administratorIds.has(candidate.id));
+  const scheduleWork = schedulePrivacyWork || ((work) => setTimeout(work, 0));
+  const schedulePrivacy = () => scheduleWork(() => privacyWorker.drain());
   const deliveryCapability = Symbol("notification delivery capability");
   const ownDatabase = !injectedDatabase;
 
@@ -262,6 +273,53 @@ export function createApp(options = {}) {
         auth.logout(token);
         return { status: 204, headers: { "set-cookie": `${sessionCookie("", 0)}; Expires=Thu, 01 Jan 1970 00:00:00 GMT` }, body: "" };
       }
+      const exportJobMatch = /^\/api\/me\/export\/jobs\/([^/]+?)(?:\/(result))?$/.exec(url.pathname);
+      const deletionStatusMatch = /^\/api\/admin\/users\/delete\/([^/]+)$/.exec(url.pathname);
+      const auditMutation = /^\/api\/admin\/audit(?:\/[^/]+)?$/.test(url.pathname) && ["DELETE", "PATCH", "PUT", "POST"].includes(method);
+      if (auditMutation) {
+        if (!account) return json(401, authenticationError);
+        if (!isAdministrator(account)) return json(403, forbiddenError);
+        return json(405, methodNotAllowedError, { allow: "GET" });
+      }
+      if (method === "POST" && url.pathname === "/api/me/export") {
+        if (!account) return json(401, authenticationError);
+        if (!selfRequest(request.payload)) return json(422, invalidRequestError);
+        const result = privacy.requestExport(account.id);
+        if (result.kind === "lost-authority") return json(401, authenticationError);
+        if (result.kind !== "success") return json(503, { error: "Privacy service unavailable" });
+        if (!result.existing) schedulePrivacy();
+        return json(202, result.job);
+      }
+      if (method === "GET" && exportJobMatch) {
+        if (!account) return json(401, authenticationError);
+        const jobId = opaqueId(decodeURIComponent(exportJobMatch[1]));
+        if (!jobId) return json(404, notFoundError);
+        if (exportJobMatch[2]) { const data = privacy.exportResult(jobId, account.id); return data ? json(200, data) : json(404, notFoundError); }
+        const job = privacy.exportStatus(jobId, account.id); return job ? json(200, job) : json(404, notFoundError);
+      }
+      if (method === "GET" && url.pathname === "/api/admin/audit") {
+        if (!account) return json(401, authenticationError);
+        if (!isAdministrator(account)) return json(403, forbiddenError);
+        const page = auditPage(url.searchParams); if (!page) return json(422, invalidRequestError);
+        const result = privacy.audit(account.id, page.limit, page.cursor);
+        return result ? json(200, result) : json(422, invalidRequestError);
+      }
+      if (method === "POST" && url.pathname === "/api/admin/users/delete") {
+        if (!account) return json(401, authenticationError);
+        if (!isAdministrator(account)) return json(403, forbiddenError);
+        const target = deletionTarget(parseJson(request.payload)); if (!target) return json(422, invalidRequestError);
+        const result = privacy.requestDeletion(target);
+        if (result.kind === "lost-authority") return json(404, notFoundError);
+        if (result.kind !== "success") return json(503, { error: "Privacy service unavailable" });
+        if (!result.existing) schedulePrivacy();
+        return json(202, result.job);
+      }
+      if (method === "GET" && deletionStatusMatch) {
+        if (!account) return json(401, authenticationError);
+        if (!isAdministrator(account)) return json(403, forbiddenError);
+        const jobId = opaqueId(decodeURIComponent(deletionStatusMatch[1])); if (!jobId) return json(404, notFoundError);
+        const job = privacy.deletionStatus(jobId); return job ? json(200, job) : json(404, notFoundError);
+      }
       if (method === "GET" && url.pathname === "/api/me") {
         if (!account) return json(401, authenticationError);
         const profile = profiles.getOwner(account.id);
@@ -278,10 +336,12 @@ export function createApp(options = {}) {
       }
       if (method === "DELETE" && url.pathname === "/api/me") {
         if (!account) return json(401, authenticationError);
-        const result = profiles.delete(account.id);
-        if (result.kind === "success") return json(202, { status: "Deletion requested" }, { "set-cookie": `${sessionCookie("", 0)}; Expires=Thu, 01 Jan 1970 00:00:00 GMT` });
+        if (!selfRequest(request.payload)) return json(422, invalidRequestError);
+        const result = privacy.requestDeletion(account.id);
         if (result.kind === "lost-authority") return json(401, authenticationError);
-        return json(503, profileUnavailableError);
+        if (result.kind !== "success") return json(503, profileUnavailableError);
+        if (!result.existing) schedulePrivacy();
+        return json(202, result.job, { "set-cookie": `${sessionCookie("", 0)}; Expires=Thu, 01 Jan 1970 00:00:00 GMT` });
       }
       if (method === "POST" && url.pathname === "/api/notifications/delivery/retry") {
         // No serializable request component can create this in-process capability.
@@ -619,6 +679,8 @@ export function createApp(options = {}) {
     }
   }
 
+  // Existing durable accepted work is resumed after composition is complete.
+  schedulePrivacy();
   return {
     handle,
     /** @param {AppRequest} request */
@@ -639,7 +701,9 @@ export function createApp(options = {}) {
     },
     config,
     database,
+    /** Trusted in-process test/recovery seam; no HTTP worker-control operation exists. */
+    drainPrivacy: () => privacyWorker.drain(),
     accountCount: () => authRepository.accountCount(),
-    close: () => { if (ownDatabase) database.close(); },
+    close: () => { privacyWorker.close(); if (ownDatabase) database.close(); },
   };
 }

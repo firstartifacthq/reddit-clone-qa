@@ -1,82 +1,30 @@
-# Reddit clone QA
+# Reddit Clone QA
 
-A local, server-rendered authentication, community, post, comment, and vote slice for the RC-06 campaign. It uses Node 24's built-in SQLite support and opaque, server-side session records; no production secret is read or required.
+A local Node.js/SQLite Reddit-style application used for protocol and persistence exercises.
 
-## Run locally
+## Privacy rights (RC-13)
 
-```sh
-npm ci
-npm start
-```
+Authenticated owners may request an export with `POST /api/me/export`, inspect it at
+`GET /api/me/export/jobs/{jobId}`, and retrieve a completed result at
+`GET /api/me/export/jobs/{jobId}/result`. Exports are durable acceptance-time snapshots
+of owner-scoped exportable data; they exclude passwords, password-verification material,
+session credentials and privileged security material.
 
-Optional non-secret configuration is captured when the application starts:
+`DELETE /api/me` accepts an owner deletion job and immediately revokes all sessions.
+It also revokes all exports and their local snapshot payloads. Rights jobs progress
+asynchronously and resume after restart. There is deliberately no customer cancellation,
+reactivation, expiry, legal-hold, external-backup erasure, or managed deployment surface.
 
-- `PORT` (default `3000`)
-- `DATABASE_PATH` (default `./reddit.sqlite`)
-- `SESSION_LIFETIME_MS` (default one hour)
-- `SESSION_COOKIE_NAME` (default `reddit_session`)
-- `NODE_ENV=production` enables the cookie `Secure` attribute
-- `POST_RATE_LIMIT_MAX` (default `100` valid creations)
-- `POST_RATE_LIMIT_WINDOW_MS` (default `60000`, accepted range `1` through `2592000000` milliseconds; creation facts are retained for that 30-day maximum)
+Site operators can supply a comma-separated `ADMINISTRATOR_IDS` list of stable account
+IDs at process startup (or use the application-factory authority seam in local tests).
+There is no HTTP authority-grant endpoint; community ownership, moderation, profile
+fields, headers, and request bodies cannot grant site administration. Current trusted
+administrators may use `POST /api/admin/users/delete` with `{ "userId": "..." }`,
+read `GET /api/admin/users/delete/{jobId}`, and traverse append-only privacy history at
+`GET /api/admin/audit?limit=1`. Audit events are immutable and privacy-safe; audit
+mutation attempts such as `DELETE /api/admin/audit/{eventId}` return 405.
 
-## HTTP surface
-
-- `POST /api/auth/signup`
-- `POST /api/auth/login`
-- `POST /api/auth/logout`
-- `GET`, `PATCH`, and `DELETE /api/me`
-- `GET`, `PATCH /api/me/preferences`
-- `GET /api/me/saved`
-- `GET /api/me/history`
-- `GET /api/me/notifications?limit=:limit&cursor=:cursor`
-- `PATCH`, `DELETE /api/me/notifications/:id`
-- `GET /api/users/:username/notifications`
-- `PUT`, `DELETE /api/posts/:id/save`
-- `GET /api/users/:username`
-- `POST /api/users/:username/block`
-- `GET /api/communities`
-- `GET /api/search?q=:query[&type=community|post|comment]`
-- `POST /api/communities`
-- `POST /api/communities/:canonicalName/members`
-- `DELETE /api/communities/:canonicalName/members/me`
-- `PATCH /api/communities/:canonicalName/moderators`
-- `GET /api/communities/:canonicalName/modlog`
-- `GET /api/mod/queue?limit=:limit&cursor=:cursor`
-- `DELETE /api/mod/posts/:id`
-- `POST /api/mod/posts/:id/restore`
-- `POST /api/posts/:id/reports`
-- `POST /api/communities/:canonicalName/posts`
-- `GET`, `PATCH`, and `DELETE /api/posts/:id`
-- `GET`, `PUT`, and `DELETE /api/posts/:id/vote`
-- `GET /api/posts/:id/media`
-- `POST`, `GET /api/posts/:id/comments`
-- `GET`, `PATCH`, and `DELETE /api/comments/:id`
-- `GET /`
-
-Authentication requests accept JSON with `username` and `password`. Successful signup and login return only an account's `id` and `username`; the opaque session is delivered solely in an `HttpOnly` cookie.
-
-`GET /api/me` and successful `PATCH /api/me` return the owner profile: `id`, `username`, `bio`, and integer `revision`. Public lookups return only `id`, `username`, and `bio`. Usernames use ASCII-only surrounding-whitespace trimming, must be 3 through 32 ASCII letters, digits, underscores, or hyphens, and are unique without regard to ASCII case. Bios contain up to 500 Unicode code points; an empty string clears a bio.
-
-A successful `DELETE /api/me` marks the account deletion-requested and revokes every session atomically. The account can no longer log in, authorize requests, or appear through public lookup, while its username remains reserved. Physical erasure and reactivation are intentionally out of scope.
-
-Authenticated active users can create a community with a 3 through 21 character ASCII letter, digit, or underscore name. Names are ASCII-trimmed and case-folded for uniqueness. Creation makes the creator the immutable owner; joining is idempotent, non-owners can leave, and only the owner can promote or demote an existing active member. The public list contains canonical community names in deterministic order.
-
-Current members can publish JSON text, HTTP(S) link, or image media posts. Display strings reject executable markup and script-capable URI content before persistence. Media uploads use canonical base64 in the JSON request and are stored with their metadata in the local SQLite database; media reads return the accepted bytes with their declared image content type. Post creation accepts an optional `Idempotency-Key` for safe retries and is limited per active user by the configured creation window; exhausted capacity returns HTTP 429 with `Retry-After`. Only the author can edit declared-form fields or delete a post.
-
-An authenticated active user may `POST /api/users/:username/block` to add another active account to that user's personal block list. The action is idempotent. A blocked account receives the same HTTP 404 response as an unknown post when retrieving a post authored by its blocker; no post-view history is recorded for that denied read.
-
-Authenticated active users can set or replace their own vote as JSON `{ "value": 1 }` or `{ "value": -1 }` on another active author's unlocked post, inspect their current vote, or clear it. Vote score and author karma are derived from current durable votes; no vote ledger or aggregate override route is exposed.
-
-Active community members can add JSON comments to a readable post, either top-level or with a same-post `parentId`. Conversations are depth-first pre-order pages; `limit` defaults to 25 and accepts 1 through 100. Returned cursors are opaque, resumable snapshots, so later comments do not enter an existing traversal. Comment authors may edit active comments or replace them with privacy-preserving tombstones while descendants retain their original nesting.
-
-Authenticated active users can save a readable post and retrieve their saved posts or 90-day post-view history through owner-scoped, opaque paginated snapshots. A successful authenticated non-media post read records the latest view for that user and post. Preferences default to `{ "theme": "system", "compactMode": false }`; preference patches update only supplied valid fields atomically. Other users' saved and history routes always deny without revealing private records.
-
-Notifications are private to their active owner. Eligible replies, standalone case-insensitive `u/username` mentions, effective votes on another user's post, and moderator removal of another user's post create one durable notice. Inbox pages are newest-event-first and use owner-bound opaque snapshots; owners can toggle `{ "read": true|false }` and terminally delete a notice. The delivery retry operation is available only through the application’s trusted in-process adapter and never accepts user-controlled authorization or a production secret.
-
-`GET /api/search` accepts exactly one non-empty, trimmed `q` and an optional `type` of `community`, `post`, or `comment`. It returns `{ "results": [] }` or deterministic communities, posts, and active comments using type-specific fields. Invalid search input returns HTTP 400 `{ "error": "Invalid search" }`; a transient search read failure returns HTTP 503 `{ "error": "Search unavailable" }` with `Retry-After: 1`. Search reads canonical current state and does not record post-view history or create other user state.
-
-`GET /api/feed/home`, `GET /api/feed/popular`, and `GET /api/communities/:canonicalName/feed` return `{ "posts": [...], "nextCursor": string | null }`. Home requires an active session and scopes posts to current memberships; Popular and a community feed include only currently readable canonical posts. Home and community feeds order by publication time descending, score descending, then post ID ascending. Popular orders by score descending, publication time descending, then post ID ascending. `limit` defaults to 25 and accepts canonical values from 1 through 100. Cursors are opaque, expire after 24 hours, and retain their issued order while fresh reads use current memberships and votes. Invalid pages return HTTP 422 `{ "error": "Invalid feed page" }`; transient feed reads return HTTP 503 `{ "error": "Feed unavailable" }` with `Retry-After: 1`.
-
-Active members may report a currently readable post in a community they have joined. A member can create only one durable report for each post. Current community owners and moderators can read their responsible reports through opaque, deterministic queue cursors, remove a reported or unreported post, and restore a removed post. Removal hides the post from ordinary post, media, feed, search, comment, personal, and vote surfaces without deleting it; restoration exposes the original post again. Each successful state transition appends an immutable ordered entry to that community's modlog. Audit rewrite requests are rejected with HTTP 405.
-
-Run `npm run typecheck`, `npm test`, and `npm run build` before submitting changes.
+Completed deletion removes local recoverable identity, credentials, owner content and
+snapshots, retaining only non-identifying audit and shared-structure tombstone evidence.
+Downloaded copies and backup systems outside this checkout are not application-controlled
+artifacts.

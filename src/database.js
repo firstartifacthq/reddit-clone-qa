@@ -30,6 +30,7 @@ const feedMigration = migration("007-feeds.sql");
 const moderationMigration = migration("008-moderation.sql");
 const notificationMigration = migration("009-notifications.sql");
 const safetyMigration = migration("010-safety-controls.sql");
+const privacyMigration = migration("011-privacy-rights.sql");
 
 /** @param {Database} database */
 function assertCommunityOwnerInvariant(database) {
@@ -358,7 +359,7 @@ function assertModerationInvariant(database) {
     !indexMatches("moderation_queue_traversals", "moderation_queue_traversals_expiry", 0, [["expires_at", 0, binary]])) fail();
 
   const expectedTriggers = {
-    moderation_audit_events_are_immutable: "create trigger moderation_audit_events_are_immutable before update on moderation_audit_events begin select raise(abort, 'moderation audit event is immutable'); end",
+    moderation_audit_events_are_immutable: "create trigger moderation_audit_events_are_immutable before update on moderation_audit_events when new.moderator_user_id <> '__privacy_tombstone__' begin select raise(abort, 'moderation audit event is immutable'); end",
     moderation_audit_events_cannot_be_deleted: "create trigger moderation_audit_events_cannot_be_deleted before delete on moderation_audit_events begin select raise(abort, 'moderation audit event cannot be deleted'); end",
     moderation_queue_traversals_are_immutable: "create trigger moderation_queue_traversals_are_immutable before update on moderation_queue_traversals begin select raise(abort, 'moderation queue traversal is immutable'); end",
     moderation_queue_items_are_immutable: "create trigger moderation_queue_items_are_immutable before update on moderation_queue_items begin select raise(abort, 'moderation queue item is immutable'); end",
@@ -493,10 +494,10 @@ function assertNotificationInvariant(database) {
     !indexMatches("notification_traversals", "notification_traversals_expiry", 0, [["expires_at", 0, binary]])) fail();
 
   const expectedTriggers = {
-    notification_events_are_immutable: "create trigger notification_events_are_immutable before update on notification_events begin select raise(abort, 'notification event is immutable'); end",
+    notification_events_are_immutable: "create trigger notification_events_are_immutable before update on notification_events when new.recipient_user_id <> '__privacy_tombstone__' begin select raise(abort, 'notification event is immutable'); end",
     notification_events_cannot_be_deleted: "create trigger notification_events_cannot_be_deleted before delete on notification_events begin select raise(abort, 'notification event cannot be deleted'); end",
     notifications_owner_matches_event: "create trigger notifications_owner_matches_event before insert on notifications when new.owner_user_id <> (select recipient_user_id from notification_events where id = new.event_id) begin select raise(abort, 'notification owner must match event recipient'); end",
-    notifications_owner_is_immutable: "create trigger notifications_owner_is_immutable before update of owner_user_id, event_id on notifications begin select raise(abort, 'notification ownership is immutable'); end",
+    notifications_owner_is_immutable: "create trigger notifications_owner_is_immutable before update of owner_user_id, event_id on notifications when new.owner_user_id <> '__privacy_tombstone__' begin select raise(abort, 'notification ownership is immutable'); end",
     notifications_cannot_be_hard_deleted: "create trigger notifications_cannot_be_hard_deleted before delete on notifications begin select raise(abort, 'notification cannot be hard deleted'); end",
     notifications_deletion_is_one_way: "create trigger notifications_deletion_is_one_way before update on notifications when old.deleted_at is not null begin select raise(abort, 'notification deletion is terminal'); end",
     notification_traversals_are_immutable: "create trigger notification_traversals_are_immutable before update on notification_traversals begin select raise(abort, 'notification traversal is immutable'); end",
@@ -623,6 +624,16 @@ function assertCommentInvariant(database) {
   if (triggerCount !== 7 || !hasCommentForeignKey || invalid) throw new Error("comment invariant is invalid");
 }
 
+/** @param {Database} database */
+function assertPrivacyInvariant(database) {
+  const tables = ['privacy_jobs', 'privacy_job_events', 'privacy_export_payloads', 'privacy_deletion_progress', 'privacy_audit_traversals', 'privacy_audit_tokens'];
+  if (tables.some((name) => !database.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?").get(name))) throw new Error("privacy rights invariant is invalid");
+  const triggers = ['privacy_job_events_legal_transition', 'privacy_job_events_are_immutable', 'privacy_job_events_cannot_be_deleted'];
+  if (triggers.some((name) => !database.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'trigger' AND name = ?").get(name)) ||
+    !database.prepare("SELECT 1 FROM users WHERE id = '__privacy_tombstone__' AND deletion_requested_at IS NOT NULL").get() ||
+    database.prepare("PRAGMA foreign_key_check").get()) throw new Error("privacy rights invariant is invalid");
+}
+
 /**
  * @param {string} path
  * @returns {Database}
@@ -630,9 +641,9 @@ function assertCommentInvariant(database) {
 export function openDatabase(path) {
   const database = new DatabaseSync(path, { timeout: 5_000 });
   try {
-    database.exec("PRAGMA foreign_keys = ON; BEGIN IMMEDIATE");
+    database.exec("PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON; BEGIN IMMEDIATE");
     const version = /** @type {{user_version: number}} */ (database.prepare("PRAGMA user_version").get()).user_version;
-    if (version > 11) throw new Error("Unsupported database schema version");
+    if (version > 12) throw new Error("Unsupported database schema version");
     if (version === 0) {
       database.exec(baselineMigration);
       database.exec("PRAGMA user_version = 1");
@@ -688,6 +699,10 @@ export function openDatabase(path) {
       else if (notificationTableCount !== 5 || safetyTableCount !== 2) throw new Error("Ambiguous version 10 database schema");
       database.exec("PRAGMA user_version = 11");
     }
+    if (version <= 11) {
+      database.exec(privacyMigration);
+      database.exec("PRAGMA user_version = 12");
+    }
     assertCommunityOwnerInvariant(database);
     assertPostInvariant(database);
     assertCommentInvariant(database);
@@ -698,6 +713,7 @@ export function openDatabase(path) {
     assertFeedInvariant(database);
     assertModerationInvariant(database);
     assertSafetyInvariant(database);
+    assertPrivacyInvariant(database);
     database.exec("COMMIT");
     return database;
   } catch (error) {
