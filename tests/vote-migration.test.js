@@ -57,7 +57,7 @@ test("vote migration upgrades a populated v5 database, constrains votes, cascade
     createPopulatedVersion5(path);
 
     const database = openDatabase(path);
-    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 10);
+    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 11);
     assert.deepEqual({ ...database.prepare("SELECT title, text_content, voting_state FROM posts WHERE id = ?").get("legacy-post") }, {
       title: "Legacy title", text_content: "legacy body", voting_state: "unlocked",
     });
@@ -73,7 +73,7 @@ test("vote migration upgrades a populated v5 database, constrains votes, cascade
     database.close();
 
     const reopened = openDatabase(path);
-    assert.equal(reopened.prepare("PRAGMA user_version").get().user_version, 10);
+    assert.equal(reopened.prepare("PRAGMA user_version").get().user_version, 11);
     reopened.close();
   });
 });

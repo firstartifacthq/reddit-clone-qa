@@ -4,9 +4,9 @@ import { voteRepresentation } from "./vote-representation.js";
 function rollback(database) { try { database.exec("ROLLBACK"); } catch {} }
 
 export class VoteService {
-  /** @param {{repository: import("./vote-repository.js").VoteRepository, database: {exec: (sql: string) => void}, beforeVotePersist?: () => void}} options */
-  constructor({ repository, database, beforeVotePersist = () => {} }) {
-    this.repository = repository;
+  /** @param {{repository: import("./vote-repository.js").VoteRepository, notificationService?: import("../notification/notification-service.js").NotificationService, database: {exec: (sql: string) => void}, beforeVotePersist?: () => void}} options */
+  constructor({ repository, notificationService, database, beforeVotePersist = () => {} }) {
+    this.repository = repository; this.notifications = notificationService;
     this.database = database;
     this.beforeVotePersist = beforeVotePersist;
   }
@@ -44,6 +44,7 @@ export class VoteService {
         if (prior === null && value !== null) this.repository.insertVote(postId, userId, value);
         else if (value === null) this.repository.removeVote(postId, userId);
         else this.repository.replaceVote(postId, userId, value);
+        this.notifications?.recordVoteEvent(this.repository.findTarget(postId).author_user_id, userId, postId);
       }
       const resource = this.repository.voteResource(postId, userId);
       this.database.exec("COMMIT");

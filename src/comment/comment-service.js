@@ -7,9 +7,9 @@ import { parseCommentJson, validateCommentCreate, validateCommentPatch } from ".
 function rollback(database) { try { database.exec("ROLLBACK"); } catch {} }
 
 export class CommentService {
-  /** @param {{repository: import("./comment-repository.js").CommentRepository, database: {exec: (sql: string) => void}, beforeCommentPersist?: () => void}} options */
-  constructor({ repository, database, beforeCommentPersist = () => {} }) {
-    this.repository = repository; this.database = database; this.beforeCommentPersist = beforeCommentPersist;
+  /** @param {{repository: import("./comment-repository.js").CommentRepository, notificationService?: import("../notification/notification-service.js").NotificationService, database: {exec: (sql: string) => void}, beforeCommentPersist?: () => void}} options */
+  constructor({ repository, notificationService, database, beforeCommentPersist = () => {} }) {
+    this.repository = repository; this.notifications = notificationService; this.database = database; this.beforeCommentPersist = beforeCommentPersist;
   }
   /** @param {string} userId @param {string} postId */
   authorizeCreate(userId, postId) {
@@ -34,15 +34,16 @@ export class CommentService {
       this.database.exec("BEGIN IMMEDIATE");
       if (!this.repository.hasPost(postId)) { rollback(this.database); return { kind: "not-found" }; }
       if (!this.repository.isMemberForPost(postId, userId)) { rollback(this.database); return { kind: "forbidden" }; }
-      let depth = 0;
+      let depth = 0; let parent;
       if (valid.parentId) {
-        const parent = this.repository.findParent(valid.parentId);
+        parent = this.repository.findParent(valid.parentId);
         if (!parent || parent.post_id !== postId) { rollback(this.database); return { kind: "invalid" }; }
         depth = parent.depth + 1;
       }
       this.beforeCommentPersist();
       const id = randomUUID();
       this.repository.insert({ id, postId, parentId: valid.parentId, authorId: userId, body: valid.body, depth, sequence: this.repository.nextCreatedSequence() });
+      this.notifications?.recordCommentEvents(parent, { id, authorId: userId, body: valid.body });
       const comment = this.repository.findComment(id);
       this.database.exec("COMMIT");
       return { kind: "success", comment: commentRepresentation(comment) };
