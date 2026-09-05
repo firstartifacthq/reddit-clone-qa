@@ -499,7 +499,7 @@ function assertNotificationInvariant(database) {
     notifications_owner_matches_event: "create trigger notifications_owner_matches_event before insert on notifications when new.owner_user_id <> (select recipient_user_id from notification_events where id = new.event_id) begin select raise(abort, 'notification owner must match event recipient'); end",
     notifications_owner_is_immutable: "create trigger notifications_owner_is_immutable before update of owner_user_id, event_id on notifications when new.owner_user_id <> '__privacy_tombstone__' begin select raise(abort, 'notification ownership is immutable'); end",
     notifications_cannot_be_hard_deleted: "create trigger notifications_cannot_be_hard_deleted before delete on notifications begin select raise(abort, 'notification cannot be hard deleted'); end",
-    notifications_deletion_is_one_way: "create trigger notifications_deletion_is_one_way before update on notifications when old.deleted_at is not null begin select raise(abort, 'notification deletion is terminal'); end",
+    notifications_deletion_is_one_way: "create trigger notifications_deletion_is_one_way before update on notifications when old.deleted_at is not null and new.owner_user_id <> '__privacy_tombstone__' begin select raise(abort, 'notification deletion is terminal'); end",
     notification_traversals_are_immutable: "create trigger notification_traversals_are_immutable before update on notification_traversals begin select raise(abort, 'notification traversal is immutable'); end",
     notification_traversal_item_owner_matches_traversal: "create trigger notification_traversal_item_owner_matches_traversal before insert on notification_traversal_items when (select owner_user_id from notifications where id = new.notification_id) <> (select owner_user_id from notification_traversals where id = new.traversal_id) begin select raise(abort, 'notification traversal item owner must match traversal owner'); end",
     notification_traversal_items_are_immutable: "create trigger notification_traversal_items_are_immutable before update on notification_traversal_items begin select raise(abort, 'notification traversal item is immutable'); end",
@@ -626,12 +626,149 @@ function assertCommentInvariant(database) {
 
 /** @param {Database} database */
 function assertPrivacyInvariant(database) {
-  const tables = ['privacy_jobs', 'privacy_job_events', 'privacy_export_payloads', 'privacy_deletion_progress', 'privacy_audit_traversals', 'privacy_audit_tokens'];
-  if (tables.some((name) => !database.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?").get(name))) throw new Error("privacy rights invariant is invalid");
-  const triggers = ['privacy_job_events_legal_transition', 'privacy_job_events_are_immutable', 'privacy_job_events_cannot_be_deleted'];
-  if (triggers.some((name) => !database.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'trigger' AND name = ?").get(name)) ||
-    !database.prepare("SELECT 1 FROM users WHERE id = '__privacy_tombstone__' AND deletion_requested_at IS NOT NULL").get() ||
-    database.prepare("PRAGMA foreign_key_check").get()) throw new Error("privacy rights invariant is invalid");
+  const fail = () => { throw new Error("privacy rights invariant is invalid"); };
+  const binary = "BINARY";
+  const expectedTables = {
+    privacy_jobs: `CREATE TABLE privacy_jobs (
+      id TEXT PRIMARY KEY NOT NULL,
+      operation TEXT NOT NULL CHECK (operation IN ('export', 'deletion')),
+      subject_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+      subject_key TEXT NOT NULL CHECK (length(subject_key) > 0),
+      created_at INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at >= 0)
+    )`,
+    privacy_job_events: `CREATE TABLE privacy_job_events (
+      id TEXT PRIMARY KEY NOT NULL,
+      job_id TEXT NOT NULL REFERENCES privacy_jobs(id),
+      occurrence_sequence INTEGER NOT NULL UNIQUE CHECK (typeof(occurrence_sequence) = 'integer' AND occurrence_sequence > 0),
+      operation TEXT NOT NULL CHECK (operation IN ('export', 'deletion')),
+      action TEXT NOT NULL CHECK (action IN ('accepted', 'completed', 'revoked')),
+      occurred_at INTEGER NOT NULL CHECK (typeof(occurred_at) = 'integer' AND occurred_at >= 0),
+      CHECK ((operation = 'export' AND action IN ('accepted', 'completed', 'revoked')) OR (operation = 'deletion' AND action IN ('accepted', 'completed')))
+    )`,
+    privacy_export_payloads: `CREATE TABLE privacy_export_payloads (
+      job_id TEXT PRIMARY KEY NOT NULL REFERENCES privacy_jobs(id) ON DELETE CASCADE,
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json))
+    )`,
+    privacy_deletion_progress: `CREATE TABLE privacy_deletion_progress (
+      job_id TEXT PRIMARY KEY NOT NULL REFERENCES privacy_jobs(id) ON DELETE CASCADE,
+      subject_user_id TEXT NOT NULL CHECK (length(subject_user_id) > 0),
+      phase TEXT NOT NULL CHECK (phase IN ('accepted', 'rows_erased', 'compacted'))
+    )`,
+    privacy_audit_traversals: `CREATE TABLE privacy_audit_traversals (
+      id TEXT PRIMARY KEY NOT NULL,
+      administrator_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      maximum_sequence INTEGER NOT NULL CHECK (typeof(maximum_sequence) = 'integer' AND maximum_sequence >= 0),
+      created_at INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at >= 0),
+      expires_at INTEGER NOT NULL CHECK (typeof(expires_at) = 'integer' AND expires_at > created_at)
+    )`,
+    privacy_audit_tokens: `CREATE TABLE privacy_audit_tokens (
+      token TEXT PRIMARY KEY NOT NULL,
+      traversal_id TEXT NOT NULL REFERENCES privacy_audit_traversals(id) ON DELETE CASCADE,
+      next_sequence INTEGER NOT NULL CHECK (typeof(next_sequence) = 'integer' AND next_sequence >= 0),
+      UNIQUE (traversal_id, next_sequence)
+    )`,
+  };
+  for (const [name, expected] of Object.entries(expectedTables)) {
+    const actual = database.prepare("SELECT sql FROM sqlite_schema WHERE type='table' AND name=?").get(name)?.sql || "";
+    if (normalizedSql(actual) !== normalizedSql(expected)) fail();
+  }
+
+  const expectedColumns = {
+    privacy_jobs: [["id", "TEXT", 1, 1], ["operation", "TEXT", 1, 0], ["subject_user_id", "TEXT", 0, 0], ["subject_key", "TEXT", 1, 0], ["created_at", "INTEGER", 1, 0]],
+    privacy_job_events: [["id", "TEXT", 1, 1], ["job_id", "TEXT", 1, 0], ["occurrence_sequence", "INTEGER", 1, 0], ["operation", "TEXT", 1, 0], ["action", "TEXT", 1, 0], ["occurred_at", "INTEGER", 1, 0]],
+    privacy_export_payloads: [["job_id", "TEXT", 1, 1], ["payload_json", "TEXT", 1, 0]],
+    privacy_deletion_progress: [["job_id", "TEXT", 1, 1], ["subject_user_id", "TEXT", 1, 0], ["phase", "TEXT", 1, 0]],
+    privacy_audit_traversals: [["id", "TEXT", 1, 1], ["administrator_user_id", "TEXT", 1, 0], ["maximum_sequence", "INTEGER", 1, 0], ["created_at", "INTEGER", 1, 0], ["expires_at", "INTEGER", 1, 0]],
+    privacy_audit_tokens: [["token", "TEXT", 1, 1], ["traversal_id", "TEXT", 1, 0], ["next_sequence", "INTEGER", 1, 0]],
+  };
+  for (const [table, expected] of Object.entries(expectedColumns)) {
+    const actual = database.prepare(`PRAGMA table_info(${table})`).all().map((/** @type {any} */ column) => [column.name, column.type, column.notnull, column.pk]);
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) fail();
+  }
+
+  /** @param {string} table */
+  const foreignKeys = (table) => database.prepare(`PRAGMA foreign_key_list(${table})`).all()
+    .map((/** @type {any} */ key) => [key.from, key.table, key.to, key.on_update, key.on_delete, key.match]).sort();
+  const expectedForeignKeys = {
+    privacy_jobs: [["subject_user_id", "users", "id", "NO ACTION", "SET NULL", "NONE"]],
+    privacy_job_events: [["job_id", "privacy_jobs", "id", "NO ACTION", "NO ACTION", "NONE"]],
+    privacy_export_payloads: [["job_id", "privacy_jobs", "id", "NO ACTION", "CASCADE", "NONE"]],
+    privacy_deletion_progress: [["job_id", "privacy_jobs", "id", "NO ACTION", "CASCADE", "NONE"]],
+    privacy_audit_traversals: [["administrator_user_id", "users", "id", "NO ACTION", "CASCADE", "NONE"]],
+    privacy_audit_tokens: [["traversal_id", "privacy_audit_traversals", "id", "NO ACTION", "CASCADE", "NONE"]],
+  };
+  for (const [table, expected] of Object.entries(expectedForeignKeys)) if (JSON.stringify(foreignKeys(table)) !== JSON.stringify([...expected].sort())) fail();
+
+  /** @param {string} table @param {string} name @param {number} unique @param {[string, number, string][]} columns */
+  const indexMatches = (table, name, unique, columns) => {
+    const index = database.prepare(`PRAGMA index_list(${table})`).all().find((/** @type {any} */ candidate) => candidate.name === name);
+    const actual = index && database.prepare("SELECT name, desc, coll FROM pragma_index_xinfo(?) WHERE key=1 ORDER BY seqno").all(name)
+      .map((/** @type {any} */ part) => [part.name, part.desc, part.coll]);
+    return index?.unique === unique && index?.origin === "c" && JSON.stringify(actual) === JSON.stringify(columns);
+  };
+  if (!indexMatches("privacy_jobs", "privacy_jobs_pending_subject_operation", 0, [["subject_key", 0, binary], ["operation", 0, binary]]) ||
+      !indexMatches("privacy_jobs", "privacy_jobs_subject_operation", 0, [["subject_user_id", 0, binary], ["operation", 0, binary], ["created_at", 0, binary]]) ||
+      !indexMatches("privacy_job_events", "privacy_job_events_order", 0, [["occurrence_sequence", 0, binary], ["id", 0, binary]]) ||
+      !indexMatches("privacy_job_events", "privacy_job_event_action_once", 1, [["job_id", 0, binary], ["action", 0, binary]]) ||
+      !indexMatches("privacy_deletion_progress", "privacy_deletion_progress_phase", 0, [["phase", 0, binary], ["job_id", 0, binary]]) ||
+      !indexMatches("privacy_audit_traversals", "privacy_audit_traversals_administrator", 0, [["administrator_user_id", 0, binary], ["created_at", 0, binary]])) fail();
+  /** @param {string} table @param {string[]} columns */
+  const hasUnique = (table, columns) => database.prepare(`PRAGMA index_list(${table})`).all().some((/** @type {any} */ index) => index.unique === 1 &&
+    JSON.stringify(database.prepare("SELECT name FROM pragma_index_info(?) ORDER BY seqno").all(index.name).map((/** @type {any} */ part) => part.name)) === JSON.stringify(columns));
+  if (!hasUnique("privacy_job_events", ["occurrence_sequence"]) || !hasUnique("privacy_job_events", ["job_id", "action"]) ||
+      !hasUnique("privacy_audit_tokens", ["traversal_id", "next_sequence"])) fail();
+
+  const expectedTriggers = {
+    privacy_job_events_legal_transition: `CREATE TRIGGER privacy_job_events_legal_transition BEFORE INSERT ON privacy_job_events BEGIN
+      SELECT CASE WHEN NEW.operation <> (SELECT operation FROM privacy_jobs WHERE id = NEW.job_id) THEN RAISE(ABORT, 'privacy job operation mismatch') END;
+      SELECT CASE WHEN NEW.action = 'accepted' AND EXISTS (SELECT 1 FROM privacy_job_events WHERE job_id = NEW.job_id) THEN RAISE(ABORT, 'privacy job already accepted') END;
+      SELECT CASE WHEN NEW.action = 'completed' AND NOT EXISTS (SELECT 1 FROM privacy_job_events WHERE job_id = NEW.job_id AND action = 'accepted') THEN RAISE(ABORT, 'privacy job must be pending') END;
+      SELECT CASE WHEN NEW.action = 'completed' AND EXISTS (SELECT 1 FROM privacy_job_events WHERE job_id = NEW.job_id AND action IN ('completed', 'revoked')) THEN RAISE(ABORT, 'privacy job terminal') END;
+      SELECT CASE WHEN NEW.action = 'revoked' AND (NEW.operation <> 'export' OR NOT EXISTS (SELECT 1 FROM privacy_job_events WHERE job_id = NEW.job_id AND action IN ('accepted', 'completed')) OR EXISTS (SELECT 1 FROM privacy_job_events WHERE job_id = NEW.job_id AND action = 'revoked')) THEN RAISE(ABORT, 'privacy job cannot be revoked') END;
+    END`,
+    privacy_job_events_are_immutable: "CREATE TRIGGER privacy_job_events_are_immutable BEFORE UPDATE ON privacy_job_events BEGIN SELECT RAISE(ABORT, 'privacy audit event is immutable'); END",
+    privacy_job_events_cannot_be_deleted: "CREATE TRIGGER privacy_job_events_cannot_be_deleted BEFORE DELETE ON privacy_job_events BEGIN SELECT RAISE(ABORT, 'privacy audit event cannot be deleted'); END",
+    privacy_deletion_progress_legal_transition: `CREATE TRIGGER privacy_deletion_progress_legal_transition BEFORE UPDATE OF phase ON privacy_deletion_progress
+      WHEN NOT ((OLD.phase = 'accepted' AND NEW.phase = 'rows_erased') OR (OLD.phase = 'rows_erased' AND NEW.phase = 'compacted'))
+      BEGIN SELECT RAISE(ABORT, 'privacy deletion phase transition is invalid'); END`,
+    privacy_deletion_progress_subject_is_immutable: "CREATE TRIGGER privacy_deletion_progress_subject_is_immutable BEFORE UPDATE OF subject_user_id ON privacy_deletion_progress BEGIN SELECT RAISE(ABORT, 'privacy deletion subject is immutable'); END",
+  };
+  const triggerNames = database.prepare("SELECT name FROM sqlite_schema WHERE type='trigger' AND tbl_name IN ('privacy_job_events','privacy_deletion_progress') ORDER BY name").all().map((/** @type {any} */ row) => row.name);
+  if (JSON.stringify(triggerNames) !== JSON.stringify(Object.keys(expectedTriggers).sort())) fail();
+  for (const [name, expected] of Object.entries(expectedTriggers)) {
+    const actual = database.prepare("SELECT sql FROM sqlite_schema WHERE type='trigger' AND name=?").get(name)?.sql || "";
+    if (normalizedSql(actual) !== normalizedSql(expected)) fail();
+  }
+
+  const illegalLifecycle = database.prepare(`SELECT 1 FROM privacy_jobs job
+    LEFT JOIN privacy_job_events accepted ON accepted.job_id=job.id AND accepted.action='accepted'
+    WHERE accepted.id IS NULL OR accepted.operation<>job.operation
+      OR accepted.occurrence_sequence<>(SELECT MIN(event.occurrence_sequence) FROM privacy_job_events event WHERE event.job_id=job.id)
+    UNION ALL SELECT 1 FROM privacy_job_events event JOIN privacy_jobs job ON job.id=event.job_id WHERE event.operation<>job.operation
+    UNION ALL SELECT 1 FROM privacy_job_events terminal JOIN privacy_job_events accepted ON accepted.job_id=terminal.job_id AND accepted.action='accepted'
+      WHERE terminal.action IN ('completed','revoked') AND terminal.occurrence_sequence<=accepted.occurrence_sequence
+    UNION ALL SELECT 1 FROM privacy_job_events revoked JOIN privacy_job_events completed ON completed.job_id=revoked.job_id AND completed.action='completed'
+      WHERE revoked.action='revoked' AND revoked.occurrence_sequence<=completed.occurrence_sequence
+    UNION ALL SELECT 1 FROM privacy_job_events WHERE operation='deletion' AND action='revoked'
+    UNION ALL SELECT 1 FROM privacy_export_payloads payload JOIN privacy_jobs job ON job.id=payload.job_id
+      WHERE job.operation<>'export' OR (SELECT action FROM privacy_job_events WHERE job_id=job.id ORDER BY occurrence_sequence DESC LIMIT 1) NOT IN ('accepted','completed')
+    UNION ALL SELECT 1 FROM privacy_jobs job JOIN privacy_job_events event ON event.job_id=job.id
+      WHERE job.operation='export' AND event.occurrence_sequence=(SELECT MAX(occurrence_sequence) FROM privacy_job_events WHERE job_id=job.id)
+        AND event.action IN ('accepted','completed') AND NOT EXISTS (SELECT 1 FROM privacy_export_payloads WHERE job_id=job.id)
+    UNION ALL SELECT 1 FROM privacy_deletion_progress progress JOIN privacy_jobs job ON job.id=progress.job_id
+      WHERE job.operation<>'deletion' OR (SELECT action FROM privacy_job_events WHERE job_id=job.id ORDER BY occurrence_sequence DESC LIMIT 1)<>'accepted'
+        OR (progress.phase='accepted' AND (job.subject_user_id<>progress.subject_user_id OR job.subject_key<>progress.subject_user_id))
+        OR (progress.phase IN ('rows_erased','compacted') AND (job.subject_user_id IS NOT NULL OR job.subject_key<>'__erased__'))
+    UNION ALL SELECT 1 FROM privacy_jobs job JOIN privacy_job_events event ON event.job_id=job.id
+      WHERE job.operation='deletion' AND event.occurrence_sequence=(SELECT MAX(occurrence_sequence) FROM privacy_job_events WHERE job_id=job.id)
+        AND ((event.action='accepted' AND NOT EXISTS (SELECT 1 FROM privacy_deletion_progress WHERE job_id=job.id))
+          OR (event.action='completed' AND EXISTS (SELECT 1 FROM privacy_deletion_progress WHERE job_id=job.id)))
+    LIMIT 1`).get();
+  const tombstone = database.prepare(`SELECT 1 FROM users WHERE id='__privacy_tombstone__' AND username='__privacy_tombstone__'
+    AND password_salt='!' AND password_verifier='!' AND created_at=0 AND bio='' AND revision=0 AND deletion_requested_at=0`).get();
+  const integrity = database.prepare("PRAGMA integrity_check").all();
+  if (illegalLifecycle || !tombstone || database.prepare("PRAGMA foreign_key_check").get() ||
+      integrity.length !== 1 || integrity[0].integrity_check !== "ok") fail();
 }
 
 /**

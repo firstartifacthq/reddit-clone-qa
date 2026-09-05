@@ -1,16 +1,43 @@
 // @ts-nocheck
 const TOMBSTONE = "__privacy_tombstone__";
+const ERASED_SUBJECT = "__erased__";
 
-/** SQLite is the authority for privacy state; services never retain a parallel job state. */
+/** SQLite is the authority for privacy state; services never retain a parallel public job state. */
 export class PrivacyRepository {
   /** @param {{prepare:(sql:string)=>any}} database */
   constructor(database) {
     this.database = database;
     this.activeUser = database.prepare("SELECT id FROM users WHERE id = ? AND deletion_requested_at IS NULL AND id <> ?");
-    this.currentBySubject = database.prepare(`SELECT j.id, j.operation, j.subject_user_id, j.subject_key, e.action FROM privacy_jobs j JOIN privacy_job_events e ON e.job_id=j.id WHERE j.subject_key=? AND j.operation=? AND e.occurrence_sequence=(SELECT MAX(occurrence_sequence) FROM privacy_job_events WHERE job_id=j.id) AND e.action='accepted' ORDER BY j.created_at DESC LIMIT 1`);
-    this.ownerJob = database.prepare(`SELECT j.id, j.operation, j.subject_user_id, e.action FROM privacy_jobs j JOIN privacy_job_events e ON e.job_id=j.id WHERE j.id=? AND j.subject_user_id=? AND e.occurrence_sequence=(SELECT MAX(occurrence_sequence) FROM privacy_job_events WHERE job_id=j.id)`);
-    this.job = database.prepare(`SELECT j.id, j.operation, j.subject_user_id, j.subject_key, e.action FROM privacy_jobs j JOIN privacy_job_events e ON e.job_id=j.id WHERE j.id=? AND e.occurrence_sequence=(SELECT MAX(occurrence_sequence) FROM privacy_job_events WHERE job_id=j.id)`);
-    this.pendingJobs = database.prepare(`SELECT j.id, j.operation FROM privacy_jobs j JOIN privacy_job_events e ON e.job_id=j.id WHERE e.occurrence_sequence=(SELECT MAX(occurrence_sequence) FROM privacy_job_events WHERE job_id=j.id) AND e.action='accepted' ORDER BY e.occurrence_sequence`);
+    this.currentBySubject = database.prepare(`SELECT j.id, j.operation, j.subject_user_id, j.subject_key, e.action
+      FROM privacy_jobs j JOIN privacy_job_events e ON e.job_id=j.id
+      WHERE j.subject_key=? AND j.operation=?
+        AND e.occurrence_sequence=(SELECT MAX(occurrence_sequence) FROM privacy_job_events WHERE job_id=j.id)
+        AND e.action='accepted' ORDER BY j.created_at DESC LIMIT 1`);
+    this.ownerJob = database.prepare(`SELECT j.id, j.operation, j.subject_user_id, e.action
+      FROM privacy_jobs j JOIN privacy_job_events e ON e.job_id=j.id
+      WHERE j.id=? AND j.subject_user_id=?
+        AND e.occurrence_sequence=(SELECT MAX(occurrence_sequence) FROM privacy_job_events WHERE job_id=j.id)`);
+    this.job = database.prepare(`SELECT j.id, j.operation, j.subject_user_id, j.subject_key, e.action
+      FROM privacy_jobs j JOIN privacy_job_events e ON e.job_id=j.id
+      WHERE j.id=? AND e.occurrence_sequence=(SELECT MAX(occurrence_sequence) FROM privacy_job_events WHERE job_id=j.id)`);
+    this.pendingJobs = database.prepare(`SELECT j.id, j.operation, NULL AS phase
+      FROM privacy_jobs j JOIN privacy_job_events e ON e.job_id=j.id
+      WHERE j.operation='export'
+        AND e.occurrence_sequence=(SELECT MAX(occurrence_sequence) FROM privacy_job_events WHERE job_id=j.id)
+        AND e.action='accepted'
+      UNION ALL
+      SELECT j.id, j.operation, progress.phase
+      FROM privacy_deletion_progress progress JOIN privacy_jobs j ON j.id=progress.job_id
+      JOIN privacy_job_events e ON e.job_id=j.id
+      WHERE j.operation='deletion'
+        AND e.occurrence_sequence=(SELECT MAX(occurrence_sequence) FROM privacy_job_events WHERE job_id=j.id)
+        AND e.action='accepted'
+      ORDER BY 1`);
+    this.deletionJob = database.prepare(`SELECT j.id, j.operation, progress.phase
+      FROM privacy_deletion_progress progress JOIN privacy_jobs j ON j.id=progress.job_id
+      JOIN privacy_job_events e ON e.job_id=j.id
+      WHERE j.id=? AND e.occurrence_sequence=(SELECT MAX(occurrence_sequence) FROM privacy_job_events WHERE job_id=j.id)
+        AND e.action='accepted'`);
   }
   active(id) { return Boolean(this.activeUser.get(id, TOMBSTONE)); }
   pendingFor(subject, operation) { return this.currentBySubject.get(subject, operation); }
@@ -24,45 +51,104 @@ export class PrivacyRepository {
   payload(jobId) { return this.database.prepare("SELECT payload_json FROM privacy_export_payloads WHERE job_id=?").get(jobId)?.payload_json; }
   storePayload(jobId, payload) { this.database.prepare("INSERT INTO privacy_export_payloads (job_id, payload_json) VALUES (?, ?)").run(jobId, payload); }
   removePayload(jobId) { this.database.prepare("DELETE FROM privacy_export_payloads WHERE job_id=?").run(jobId); }
-  revocableExports(subject) { return this.database.prepare(`SELECT j.id FROM privacy_jobs j JOIN privacy_job_events e ON e.job_id=j.id WHERE j.subject_key=? AND j.operation='export' AND e.occurrence_sequence=(SELECT MAX(occurrence_sequence) FROM privacy_job_events WHERE job_id=j.id) AND e.action IN ('accepted','completed')`).all(subject); }
-  beginDeletion(jobId) { this.database.prepare("INSERT OR IGNORE INTO privacy_deletion_progress (job_id, phase) VALUES (?, 'pending')").run(jobId); }
+  revocableExports(subject) { return this.database.prepare(`SELECT j.id FROM privacy_jobs j JOIN privacy_job_events e ON e.job_id=j.id
+    WHERE j.subject_key=? AND j.operation='export'
+      AND e.occurrence_sequence=(SELECT MAX(occurrence_sequence) FROM privacy_job_events WHERE job_id=j.id)
+      AND e.action IN ('accepted','completed')`).all(subject); }
+  beginDeletion(jobId, subject) { this.database.prepare("INSERT OR IGNORE INTO privacy_deletion_progress (job_id, subject_user_id, phase) VALUES (?, ?, 'accepted')").run(jobId, subject); }
   pendingWork() { return this.pendingJobs.all(); }
+  deletionWork(jobId) { return this.deletionJob.get(jobId); }
+  deletionSubject(jobId, phase) { return this.database.prepare("SELECT subject_user_id FROM privacy_deletion_progress WHERE job_id=? AND phase=?").get(jobId, phase)?.subject_user_id; }
+  advanceDeletionPhase(jobId, from, to) { return this.database.prepare("UPDATE privacy_deletion_progress SET phase=? WHERE job_id=? AND phase=?").run(to, jobId, from).changes === 1; }
+  clearDeletionProgress(jobId, phase) { return this.database.prepare("DELETE FROM privacy_deletion_progress WHERE job_id=? AND phase=?").run(jobId, phase).changes === 1; }
   maxAuditSequence() { return this.database.prepare("SELECT COALESCE(MAX(occurrence_sequence),0) AS value FROM privacy_job_events").get().value; }
   auditRange(maximum, after, limit) { return this.database.prepare("SELECT id, occurrence_sequence, operation, action, occurred_at FROM privacy_job_events WHERE occurrence_sequence > ? AND occurrence_sequence <= ? ORDER BY occurrence_sequence ASC, id ASC LIMIT ?").all(after, maximum, limit); }
   createTraversal(id, administrator, maximum, now) { this.database.prepare("INSERT INTO privacy_audit_traversals (id, administrator_user_id, maximum_sequence, created_at, expires_at) VALUES (?, ?, ?, ?, ?)").run(id, administrator, maximum, now, now + 86_400_000); }
-  traversal(token, administrator) { return this.database.prepare(`SELECT traversal.id, token.next_sequence, traversal.maximum_sequence FROM privacy_audit_tokens token JOIN privacy_audit_traversals traversal ON traversal.id=token.traversal_id WHERE token.token=? AND traversal.administrator_user_id=?`).get(token, administrator); }
-  token(id, traversal, next) { this.database.prepare("INSERT OR IGNORE INTO privacy_audit_tokens (token, traversal_id, next_sequence) VALUES (?, ?, ?)").run(id, traversal, next); }
+  traversal(token, administrator) { return this.database.prepare(`SELECT traversal.id, token.next_sequence, traversal.maximum_sequence
+    FROM privacy_audit_tokens token JOIN privacy_audit_traversals traversal ON traversal.id=token.traversal_id
+    WHERE token.token=? AND traversal.administrator_user_id=?`).get(token, administrator); }
+  token(id, traversal, next) {
+    this.database.prepare("INSERT OR IGNORE INTO privacy_audit_tokens (token, traversal_id, next_sequence) VALUES (?, ?, ?)").run(id, traversal, next);
+    return this.database.prepare("SELECT token FROM privacy_audit_tokens WHERE traversal_id=? AND next_sequence=?").get(traversal, next).token;
+  }
 
-  /** A canonical, credential-free acceptance-time snapshot. */
+  /** A canonical, credential-free acceptance-time snapshot of every owner-linked durable category. */
   exportSnapshot(userId) {
     const all = (sql, ...args) => this.database.prepare(sql).all(...args);
     const account = this.database.prepare("SELECT id, username, bio, revision, created_at, deletion_requested_at FROM users WHERE id=?").get(userId);
-    const posts = all("SELECT * FROM posts WHERE author_user_id=?", userId).map((row) => ({ ...row, media_bytes: row.media_bytes === null ? null : Buffer.from(row.media_bytes).toString("base64") }));
+    const posts = all("SELECT * FROM posts WHERE author_user_id=? ORDER BY id", userId).map((row) => ({ ...row, media_bytes: row.media_bytes === null ? null : Buffer.from(row.media_bytes).toString("base64") }));
+    const traversalChildren = (table, foreignTable, foreignColumn, ownerColumn) => all(`SELECT child.* FROM ${table} child JOIN ${foreignTable} parent ON parent.id=child.traversal_id WHERE parent.${ownerColumn}=? ORDER BY child.traversal_id`, userId);
     return JSON.stringify({ account, data: {
-      memberships: all("SELECT * FROM community_memberships WHERE user_id=?", userId), communities: all("SELECT canonical_name, display_name, created_at FROM communities WHERE owner_user_id=?", userId), posts,
-      comments: all("SELECT * FROM comments WHERE author_user_id=?", userId), votes: all("SELECT * FROM post_votes WHERE voter_user_id=?", userId), reports: all("SELECT * FROM reports WHERE reporter_user_id=?", userId),
-      saved: all("SELECT * FROM saved_posts WHERE user_id=?", userId), history: all("SELECT * FROM post_history WHERE user_id=?", userId), preferences: all("SELECT * FROM user_preferences WHERE user_id=?", userId),
-      notifications: all("SELECT n.* FROM notifications n WHERE n.owner_user_id=?", userId), notificationEvents: all("SELECT id, event_key, occurrence_sequence, kind, related_item_type, related_item_id, occurred_at FROM notification_events WHERE recipient_user_id=?", userId),
-      blocks: all("SELECT * FROM user_blocks WHERE blocker_user_id=? OR blocked_user_id=?", userId, userId), rateFacts: all("SELECT id, post_id, created_at FROM post_creation_events WHERE user_id=?", userId),
-      moderation: all("SELECT id, occurrence_sequence, post_id, community_name, action, occurred_at FROM moderation_audit_events WHERE moderator_user_id=?", userId)
-    }});
+      sessionFacts: all("SELECT issued_at, expires_at, revoked_at FROM sessions WHERE user_id=? ORDER BY issued_at", userId),
+      memberships: all("SELECT * FROM community_memberships WHERE user_id=? ORDER BY community_name", userId),
+      communities: all("SELECT canonical_name, display_name, created_at FROM communities WHERE owner_user_id=? ORDER BY canonical_name", userId),
+      posts,
+      postRequests: all("SELECT community_name, idempotency_key, body_digest, response_json, post_id FROM post_idempotency WHERE author_user_id=? ORDER BY community_name, idempotency_key", userId),
+      comments: all("SELECT * FROM comments WHERE author_user_id=? ORDER BY id", userId),
+      votes: all("SELECT * FROM post_votes WHERE voter_user_id=? ORDER BY post_id", userId),
+      reports: all("SELECT * FROM reports WHERE reporter_user_id=? ORDER BY id", userId),
+      saved: all("SELECT * FROM saved_posts WHERE user_id=? ORDER BY post_id", userId),
+      history: all("SELECT * FROM post_history WHERE user_id=? ORDER BY post_id", userId),
+      preferences: all("SELECT * FROM user_preferences WHERE user_id=?", userId),
+      personalTraversals: all("SELECT * FROM personal_traversals WHERE user_id=? ORDER BY id", userId),
+      personalTraversalItems: traversalChildren("personal_traversal_items", "personal_traversals", "id", "user_id"),
+      personalPageTokens: traversalChildren("personal_page_tokens", "personal_traversals", "id", "user_id"),
+      feedTraversals: all("SELECT * FROM feed_traversals WHERE requester_user_id=? ORDER BY id", userId),
+      feedTraversalItems: traversalChildren("feed_traversal_items", "feed_traversals", "id", "requester_user_id"),
+      feedPageTokens: traversalChildren("feed_page_tokens", "feed_traversals", "id", "requester_user_id"),
+      notifications: all("SELECT * FROM notifications WHERE owner_user_id=? ORDER BY id", userId),
+      notificationEvents: all("SELECT id, event_key, occurrence_sequence, kind, related_item_type, related_item_id, occurred_at FROM notification_events WHERE recipient_user_id=? ORDER BY id", userId),
+      notificationTraversals: all("SELECT * FROM notification_traversals WHERE owner_user_id=? ORDER BY id", userId),
+      notificationTraversalItems: traversalChildren("notification_traversal_items", "notification_traversals", "id", "owner_user_id"),
+      notificationPageTokens: traversalChildren("notification_page_tokens", "notification_traversals", "id", "owner_user_id"),
+      blocks: all("SELECT * FROM user_blocks WHERE blocker_user_id=? OR blocked_user_id=? ORDER BY blocker_user_id, blocked_user_id", userId, userId),
+      rateFacts: all("SELECT id, post_id, created_at FROM post_creation_events WHERE user_id=? ORDER BY id", userId),
+      moderation: all("SELECT id, occurrence_sequence, post_id, community_name, action, occurred_at FROM moderation_audit_events WHERE moderator_user_id=? ORDER BY id", userId),
+      moderationTraversals: all("SELECT * FROM moderation_queue_traversals WHERE requester_user_id=? ORDER BY id", userId),
+      moderationTraversalItems: traversalChildren("moderation_queue_items", "moderation_queue_traversals", "id", "requester_user_id"),
+      moderationPageTokens: traversalChildren("moderation_queue_tokens", "moderation_queue_traversals", "id", "requester_user_id"),
+      rightsJobs: all("SELECT id, operation, created_at FROM privacy_jobs WHERE subject_key=? ORDER BY created_at, id", userId),
+      rightsEvents: all("SELECT e.id, e.job_id, e.occurrence_sequence, e.operation, e.action, e.occurred_at FROM privacy_job_events e JOIN privacy_jobs j ON j.id=e.job_id WHERE j.subject_key=? ORDER BY e.occurrence_sequence", userId),
+      auditTraversals: all("SELECT id, maximum_sequence, created_at, expires_at FROM privacy_audit_traversals WHERE administrator_user_id=? ORDER BY id", userId),
+      auditTokens: traversalChildren("privacy_audit_tokens", "privacy_audit_traversals", "id", "administrator_user_id")
+    } });
   }
 
-  /** Remove subject data and only preserve shared structural records through the fixed inactive tombstone. */
+  /** Remove subject data while preserving shared structure through the fixed inactive tombstone. */
   erase(userId) {
     const run = (sql, ...args) => this.database.prepare(sql).run(...args);
     run("DELETE FROM sessions WHERE user_id=?", userId);
     run("DELETE FROM post_idempotency WHERE author_user_id=?", userId);
     run("DELETE FROM saved_posts WHERE user_id=?", userId); run("DELETE FROM post_history WHERE user_id=?", userId); run("DELETE FROM user_preferences WHERE user_id=?", userId);
-    run("DELETE FROM personal_traversals WHERE user_id=?", userId); run("DELETE FROM notification_traversals WHERE owner_user_id=?", userId); run("DELETE FROM moderation_queue_traversals WHERE requester_user_id=?", userId);
+    run("DELETE FROM personal_traversals WHERE user_id=?", userId); run("DELETE FROM feed_traversals WHERE requester_user_id=?", userId);
+    run("DELETE FROM notification_traversals WHERE owner_user_id=?", userId); run("DELETE FROM moderation_queue_traversals WHERE requester_user_id=?", userId);
     run("DELETE FROM user_blocks WHERE blocker_user_id=? OR blocked_user_id=?", userId, userId); run("DELETE FROM post_creation_events WHERE user_id=?", userId); run("DELETE FROM post_votes WHERE voter_user_id=?", userId);
     run("UPDATE comments SET state='deleted', author_user_id=NULL, body=NULL WHERE author_user_id=?", userId);
     run("UPDATE posts SET author_user_id=?, title='[deleted]', text_content=CASE WHEN type='text' THEN '[deleted]' ELSE text_content END, url_content=CASE WHEN type='link' THEN 'https://invalid.example/deleted' ELSE url_content END, media_filename=CASE WHEN type='media' THEN 'deleted' ELSE media_filename END, media_bytes=CASE WHEN type='media' THEN x'' ELSE media_bytes END WHERE author_user_id=?", TOMBSTONE, userId);
     run("UPDATE communities SET owner_user_id=? WHERE owner_user_id=?", TOMBSTONE, userId); run("UPDATE community_memberships SET user_id=? WHERE user_id=? AND role='owner'", TOMBSTONE, userId); run("DELETE FROM community_memberships WHERE user_id=?", userId);
     run("UPDATE reports SET reporter_user_id=? WHERE reporter_user_id=?", TOMBSTONE, userId); run("UPDATE moderation_audit_events SET moderator_user_id=? WHERE moderator_user_id=?", TOMBSTONE, userId);
     run("UPDATE notification_events SET recipient_user_id=? WHERE recipient_user_id=?", TOMBSTONE, userId); run("UPDATE notifications SET owner_user_id=? WHERE owner_user_id=?", TOMBSTONE, userId);
-    run("DELETE FROM privacy_audit_traversals WHERE administrator_user_id=?", userId); run("DELETE FROM privacy_export_payloads WHERE job_id IN (SELECT id FROM privacy_jobs WHERE subject_user_id=?)", userId);
-    run("UPDATE privacy_jobs SET subject_user_id=NULL, subject_key='__erased__' WHERE subject_user_id=?", userId);
+    run("DELETE FROM privacy_audit_traversals WHERE administrator_user_id=?", userId);
+    run("DELETE FROM privacy_export_payloads WHERE job_id IN (SELECT id FROM privacy_jobs WHERE subject_user_id=? OR subject_key=?)", userId, userId);
+    run("UPDATE privacy_jobs SET subject_user_id=NULL, subject_key=? WHERE subject_user_id=? OR subject_key=?", ERASED_SUBJECT, userId, userId);
     run("DELETE FROM users WHERE id=?", userId);
+  }
+
+  /** No application table except the incomplete internal checkpoint may retain the erased stable identity. */
+  verifyErasure(jobId, subject) {
+    const tables = this.database.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all();
+    for (const { name } of tables) {
+      const columns = this.database.prepare("SELECT name FROM pragma_table_info(?)").all(name);
+      for (const { name: column } of columns) {
+        if (name === "privacy_deletion_progress" && column === "subject_user_id") continue;
+        const tableName = `"${name.replaceAll('"', '""')}"`;
+        const columnName = `"${column.replaceAll('"', '""')}"`;
+        if (this.database.prepare(`SELECT 1 FROM ${tableName} WHERE instr(CAST(${columnName} AS TEXT), ?) > 0 LIMIT 1`).get(subject)) return false;
+      }
+    }
+    if (this.database.prepare("SELECT 1 FROM privacy_export_payloads payload JOIN privacy_jobs job ON job.id=payload.job_id WHERE job.subject_key=? OR job.subject_user_id=? LIMIT 1").get(subject, subject)) return false;
+    if (this.database.prepare("PRAGMA foreign_key_check").get()) return false;
+    const integrity = this.database.prepare("PRAGMA integrity_check").all();
+    return integrity.length === 1 && integrity[0].integrity_check === "ok" && Boolean(this.database.prepare("SELECT 1 FROM privacy_deletion_progress WHERE job_id=? AND subject_user_id=? AND phase='compacted'").get(jobId, subject));
   }
 }

@@ -1,4 +1,4 @@
--- RC-13 privacy rights ledger. State is represented only by append-only events.
+-- RC-13 privacy rights ledger. Public lifecycle state is represented only by append-only events.
 INSERT OR IGNORE INTO users (id, username, password_salt, password_verifier, created_at, bio, revision, deletion_requested_at)
 VALUES ('__privacy_tombstone__', '__privacy_tombstone__', '!', '!', 0, '', 0, 0);
 
@@ -27,6 +27,10 @@ DROP TRIGGER notifications_owner_is_immutable;
 CREATE TRIGGER notifications_owner_is_immutable BEFORE UPDATE OF owner_user_id, event_id ON notifications
 WHEN NEW.owner_user_id <> '__privacy_tombstone__'
 BEGIN SELECT RAISE(ABORT, 'notification ownership is immutable'); END;
+DROP TRIGGER notifications_deletion_is_one_way;
+CREATE TRIGGER notifications_deletion_is_one_way BEFORE UPDATE ON notifications
+WHEN OLD.deleted_at IS NOT NULL AND NEW.owner_user_id <> '__privacy_tombstone__'
+BEGIN SELECT RAISE(ABORT, 'notification deletion is terminal'); END;
 DROP TRIGGER moderation_audit_events_are_immutable;
 CREATE TRIGGER moderation_audit_events_are_immutable BEFORE UPDATE ON moderation_audit_events
 WHEN NEW.moderator_user_id <> '__privacy_tombstone__'
@@ -36,35 +40,61 @@ CREATE TABLE privacy_jobs (
   id TEXT PRIMARY KEY NOT NULL,
   operation TEXT NOT NULL CHECK (operation IN ('export', 'deletion')),
   subject_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
-  subject_key TEXT NOT NULL,
+  subject_key TEXT NOT NULL CHECK (length(subject_key) > 0),
   created_at INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at >= 0)
 );
-CREATE INDEX privacy_jobs_pending_subject_operation ON privacy_jobs(subject_key, operation);
-CREATE INDEX privacy_jobs_subject_operation ON privacy_jobs(subject_user_id, operation, created_at);
+CREATE INDEX privacy_jobs_pending_subject_operation ON privacy_jobs(subject_key ASC, operation ASC);
+CREATE INDEX privacy_jobs_subject_operation ON privacy_jobs(subject_user_id ASC, operation ASC, created_at ASC);
 
 CREATE TABLE privacy_job_events (
- id TEXT PRIMARY KEY NOT NULL,
- job_id TEXT NOT NULL REFERENCES privacy_jobs(id),
- occurrence_sequence INTEGER NOT NULL UNIQUE CHECK (typeof(occurrence_sequence) = 'integer' AND occurrence_sequence > 0),
- operation TEXT NOT NULL CHECK (operation IN ('export', 'deletion')),
- action TEXT NOT NULL CHECK (action IN ('accepted', 'completed', 'revoked')),
- occurred_at INTEGER NOT NULL CHECK (typeof(occurred_at) = 'integer' AND occurred_at >= 0),
- CHECK ((operation = 'export' AND action IN ('accepted','completed','revoked')) OR (operation = 'deletion' AND action IN ('accepted','completed')))
+  id TEXT PRIMARY KEY NOT NULL,
+  job_id TEXT NOT NULL REFERENCES privacy_jobs(id),
+  occurrence_sequence INTEGER NOT NULL UNIQUE CHECK (typeof(occurrence_sequence) = 'integer' AND occurrence_sequence > 0),
+  operation TEXT NOT NULL CHECK (operation IN ('export', 'deletion')),
+  action TEXT NOT NULL CHECK (action IN ('accepted', 'completed', 'revoked')),
+  occurred_at INTEGER NOT NULL CHECK (typeof(occurred_at) = 'integer' AND occurred_at >= 0),
+  CHECK ((operation = 'export' AND action IN ('accepted', 'completed', 'revoked')) OR (operation = 'deletion' AND action IN ('accepted', 'completed')))
 );
-CREATE INDEX privacy_job_events_order ON privacy_job_events(occurrence_sequence, id);
-CREATE UNIQUE INDEX privacy_job_event_action_once ON privacy_job_events(job_id, action);
+CREATE INDEX privacy_job_events_order ON privacy_job_events(occurrence_sequence ASC, id ASC);
+CREATE UNIQUE INDEX privacy_job_event_action_once ON privacy_job_events(job_id ASC, action ASC);
 CREATE TRIGGER privacy_job_events_legal_transition BEFORE INSERT ON privacy_job_events
 BEGIN
- SELECT CASE WHEN NEW.operation <> (SELECT operation FROM privacy_jobs WHERE id = NEW.job_id) THEN RAISE(ABORT, 'privacy job operation mismatch') END;
- SELECT CASE WHEN NEW.action = 'accepted' AND EXISTS (SELECT 1 FROM privacy_job_events WHERE job_id = NEW.job_id) THEN RAISE(ABORT, 'privacy job already accepted') END;
- SELECT CASE WHEN NEW.action = 'completed' AND NOT EXISTS (SELECT 1 FROM privacy_job_events WHERE job_id = NEW.job_id AND action = 'accepted') THEN RAISE(ABORT, 'privacy job must be pending') END;
- SELECT CASE WHEN NEW.action = 'completed' AND EXISTS (SELECT 1 FROM privacy_job_events WHERE job_id = NEW.job_id AND action IN ('completed','revoked')) THEN RAISE(ABORT, 'privacy job terminal') END;
- SELECT CASE WHEN NEW.action = 'revoked' AND (NEW.operation <> 'export' OR NOT EXISTS (SELECT 1 FROM privacy_job_events WHERE job_id = NEW.job_id AND action IN ('accepted','completed')) OR EXISTS (SELECT 1 FROM privacy_job_events WHERE job_id = NEW.job_id AND action = 'revoked')) THEN RAISE(ABORT, 'privacy job cannot be revoked') END;
+  SELECT CASE WHEN NEW.operation <> (SELECT operation FROM privacy_jobs WHERE id = NEW.job_id) THEN RAISE(ABORT, 'privacy job operation mismatch') END;
+  SELECT CASE WHEN NEW.action = 'accepted' AND EXISTS (SELECT 1 FROM privacy_job_events WHERE job_id = NEW.job_id) THEN RAISE(ABORT, 'privacy job already accepted') END;
+  SELECT CASE WHEN NEW.action = 'completed' AND NOT EXISTS (SELECT 1 FROM privacy_job_events WHERE job_id = NEW.job_id AND action = 'accepted') THEN RAISE(ABORT, 'privacy job must be pending') END;
+  SELECT CASE WHEN NEW.action = 'completed' AND EXISTS (SELECT 1 FROM privacy_job_events WHERE job_id = NEW.job_id AND action IN ('completed', 'revoked')) THEN RAISE(ABORT, 'privacy job terminal') END;
+  SELECT CASE WHEN NEW.action = 'revoked' AND (NEW.operation <> 'export' OR NOT EXISTS (SELECT 1 FROM privacy_job_events WHERE job_id = NEW.job_id AND action IN ('accepted', 'completed')) OR EXISTS (SELECT 1 FROM privacy_job_events WHERE job_id = NEW.job_id AND action = 'revoked')) THEN RAISE(ABORT, 'privacy job cannot be revoked') END;
 END;
 CREATE TRIGGER privacy_job_events_are_immutable BEFORE UPDATE ON privacy_job_events BEGIN SELECT RAISE(ABORT, 'privacy audit event is immutable'); END;
 CREATE TRIGGER privacy_job_events_cannot_be_deleted BEFORE DELETE ON privacy_job_events BEGIN SELECT RAISE(ABORT, 'privacy audit event cannot be deleted'); END;
 
-CREATE TABLE privacy_export_payloads (job_id TEXT PRIMARY KEY NOT NULL REFERENCES privacy_jobs(id) ON DELETE CASCADE, payload_json TEXT NOT NULL);
-CREATE TABLE privacy_deletion_progress (job_id TEXT PRIMARY KEY NOT NULL REFERENCES privacy_jobs(id) ON DELETE CASCADE, phase TEXT NOT NULL CHECK (phase IN ('pending','sanitizing','vacuumed')));
-CREATE TABLE privacy_audit_traversals (id TEXT PRIMARY KEY NOT NULL, administrator_user_id TEXT NOT NULL, maximum_sequence INTEGER NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
-CREATE TABLE privacy_audit_tokens (token TEXT PRIMARY KEY NOT NULL, traversal_id TEXT NOT NULL REFERENCES privacy_audit_traversals(id) ON DELETE CASCADE, next_sequence INTEGER NOT NULL, UNIQUE(traversal_id, next_sequence));
+CREATE TABLE privacy_export_payloads (
+  job_id TEXT PRIMARY KEY NOT NULL REFERENCES privacy_jobs(id) ON DELETE CASCADE,
+  payload_json TEXT NOT NULL CHECK (json_valid(payload_json))
+);
+CREATE TABLE privacy_deletion_progress (
+  job_id TEXT PRIMARY KEY NOT NULL REFERENCES privacy_jobs(id) ON DELETE CASCADE,
+  subject_user_id TEXT NOT NULL CHECK (length(subject_user_id) > 0),
+  phase TEXT NOT NULL CHECK (phase IN ('accepted', 'rows_erased', 'compacted'))
+);
+CREATE INDEX privacy_deletion_progress_phase ON privacy_deletion_progress(phase ASC, job_id ASC);
+CREATE TRIGGER privacy_deletion_progress_legal_transition BEFORE UPDATE OF phase ON privacy_deletion_progress
+WHEN NOT ((OLD.phase = 'accepted' AND NEW.phase = 'rows_erased') OR (OLD.phase = 'rows_erased' AND NEW.phase = 'compacted'))
+BEGIN SELECT RAISE(ABORT, 'privacy deletion phase transition is invalid'); END;
+CREATE TRIGGER privacy_deletion_progress_subject_is_immutable BEFORE UPDATE OF subject_user_id ON privacy_deletion_progress
+BEGIN SELECT RAISE(ABORT, 'privacy deletion subject is immutable'); END;
+
+CREATE TABLE privacy_audit_traversals (
+  id TEXT PRIMARY KEY NOT NULL,
+  administrator_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  maximum_sequence INTEGER NOT NULL CHECK (typeof(maximum_sequence) = 'integer' AND maximum_sequence >= 0),
+  created_at INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at >= 0),
+  expires_at INTEGER NOT NULL CHECK (typeof(expires_at) = 'integer' AND expires_at > created_at)
+);
+CREATE INDEX privacy_audit_traversals_administrator ON privacy_audit_traversals(administrator_user_id ASC, created_at ASC);
+CREATE TABLE privacy_audit_tokens (
+  token TEXT PRIMARY KEY NOT NULL,
+  traversal_id TEXT NOT NULL REFERENCES privacy_audit_traversals(id) ON DELETE CASCADE,
+  next_sequence INTEGER NOT NULL CHECK (typeof(next_sequence) = 'integer' AND next_sequence >= 0),
+  UNIQUE (traversal_id, next_sequence)
+);

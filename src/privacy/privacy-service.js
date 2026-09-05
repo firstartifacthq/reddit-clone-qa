@@ -24,7 +24,7 @@ export class PrivacyService {
           this.repository.removePayload(exportJob.id);
           this.repository.event(this.identifier(), exportJob.id, "export", "revoked", this.now());
         }
-        this.repository.beginDeletion(jobId);
+        this.repository.beginDeletion(jobId, subject);
         this.database.prepare("UPDATE users SET deletion_requested_at=? WHERE id=? AND deletion_requested_at IS NULL").run(this.now(), subject);
         this.database.prepare("UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL").run(this.now(), subject);
       }
@@ -46,17 +46,42 @@ export class PrivacyService {
       this.database.exec("COMMIT"); return true;
     } catch { rollback(this.database); return false; }
   }
-  completeDeletion(jobId) {
+  /** Advance exactly one durable deletion checkpoint. Completion is last, after compaction and verification. */
+  advanceDeletion(job) {
     try {
+      if (job.phase === "rows_erased") {
+        // VACUUM cannot run in a transaction. If it or the following checkpoint commit is interrupted,
+        // rows_erased remains authoritative and the same compaction is safely retried after reopen.
+        this.database.exec("VACUUM");
+        this.database.exec("BEGIN IMMEDIATE");
+        const current = this.repository.current(job.id);
+        if (!current || current.operation !== "deletion" || current.action !== "accepted" ||
+            !this.repository.advanceDeletionPhase(job.id, "rows_erased", "compacted")) { rollback(this.database); return false; }
+        this.database.exec("COMMIT");
+        return true;
+      }
+
       this.database.exec("BEGIN IMMEDIATE");
-      const current = this.repository.current(jobId);
-      if (!current || current.operation !== "deletion" || current.action !== "accepted" || !current.subject_user_id) { rollback(this.database); return false; }
-      this.repository.erase(current.subject_user_id);
-      this.repository.event(this.identifier(), jobId, "deletion", "completed", this.now());
-      this.database.exec("COMMIT");
-      // secure_delete is connection-wide; compaction finishes before the worker reports completion to callers.
-      this.database.exec("VACUUM");
-      return true;
+      const current = this.repository.current(job.id);
+      if (!current || current.operation !== "deletion" || current.action !== "accepted") { rollback(this.database); return false; }
+      if (job.phase === "accepted") {
+        const subject = this.repository.deletionSubject(job.id, "accepted");
+        if (!subject) { rollback(this.database); return false; }
+        this.repository.erase(subject);
+        if (!this.repository.advanceDeletionPhase(job.id, "accepted", "rows_erased")) { rollback(this.database); return false; }
+        this.database.exec("COMMIT");
+        return true;
+      }
+      if (job.phase === "compacted") {
+        const subject = this.repository.deletionSubject(job.id, "compacted");
+        if (!subject || !this.repository.verifyErasure(job.id, subject)) { rollback(this.database); return false; }
+        if (!this.repository.clearDeletionProgress(job.id, "compacted")) { rollback(this.database); return false; }
+        this.repository.event(this.identifier(), job.id, "deletion", "completed", this.now());
+        this.database.exec("COMMIT");
+        return true;
+      }
+      rollback(this.database);
+      return false;
     } catch { rollback(this.database); return false; }
   }
   /** @param {string} administrator @param {number} limit @param {string | undefined} cursor */
@@ -75,7 +100,9 @@ export class PrivacyService {
       }
       const events = this.repository.auditRange(maximum, after, limit).map(auditRepresentation);
       let nextCursor;
-      if (events.length === limit) { nextCursor = this.identifier(); this.repository.token(nextCursor, traversalId || this.repository.traversal(cursor, administrator)?.id, events.at(-1).sequence); }
+      if (events.length === limit) {
+        nextCursor = this.repository.token(this.identifier(), traversalId, events.at(-1).sequence);
+      }
       this.database.exec("COMMIT");
       return { events, nextCursor: nextCursor || null };
     } catch { rollback(this.database); return undefined; }
