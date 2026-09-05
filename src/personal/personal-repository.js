@@ -5,7 +5,9 @@ export class PersonalRepository {
   constructor(database) {
     this.activeUser = database.prepare("SELECT 1 FROM users WHERE id = ? AND deletion_requested_at IS NULL");
     this.post = database.prepare(`SELECT posts.*, users.username FROM readable_posts AS posts JOIN users ON users.id = posts.author_user_id AND users.deletion_requested_at IS NULL
-      WHERE posts.id = ?`);
+      WHERE posts.id = ? AND NOT EXISTS (
+        SELECT 1 FROM user_blocks WHERE blocker_user_id = posts.author_user_id AND blocked_user_id = ?
+      )`);
     this.insertSaved = database.prepare("INSERT OR IGNORE INTO saved_posts (user_id, post_id, saved_at) VALUES (?, ?, ?)");
     this.deleteSaved = database.prepare("DELETE FROM saved_posts WHERE user_id = ? AND post_id = ?");
     this.upsertHistory = database.prepare(`INSERT INTO post_history (user_id, post_id, viewed_at) VALUES (?, ?, ?)
@@ -38,7 +40,7 @@ export class PersonalRepository {
     this.tokenForStart = database.prepare("SELECT token FROM personal_page_tokens WHERE traversal_id = ? AND start_ordinal = ?");
   }
   /** @param {string} userId */ isActiveUser(userId) { return Boolean(this.activeUser.get(userId)); }
-  /** @param {string} postId */ findReadablePost(postId) { return this.post.get(postId); }
+  /** @param {string} postId @param {string} [requesterId] */ findReadablePost(postId, requesterId = "") { return this.post.get(postId, requesterId); }
   /** @param {string} userId @param {string} postId @param {number} now */ save(userId, postId, now) { this.insertSaved.run(userId, postId, now); }
   /** @param {string} userId @param {string} postId */ unsave(userId, postId) { this.deleteSaved.run(userId, postId); }
   /** @param {string} userId @param {string} postId @param {number} now */ view(userId, postId, now) { this.upsertHistory.run(userId, postId, now); }

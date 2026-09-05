@@ -10,15 +10,17 @@ function exactKeys(body, keys) {
   const candidate = /** @type {Record<string, unknown>} */ (body);
   return Object.keys(candidate).length === keys.length && keys.every((key) => Object.hasOwn(candidate, key)) ? candidate : undefined;
 }
+/** @param {string} value */
+function hasExecutableContent(value) { return /[<>]|(?:javascript|vbscript|data)\s*:/iu.test(value); }
 /** @param {unknown} value */
 function title(value) {
   if (typeof value !== "string") return undefined;
   const trimmed = asciiTrim(value);
-  return codePoints(trimmed) >= 1 && codePoints(trimmed) <= 300 ? trimmed : undefined;
+  return codePoints(trimmed) >= 1 && codePoints(trimmed) <= 300 && !hasExecutableContent(trimmed) ? trimmed : undefined;
 }
 /** @param {unknown} value */
 function text(value) {
-  if (typeof value !== "string" || codePoints(value) < 1 || codePoints(value) > 40_000 || !/\S/u.test(value)) return undefined;
+  if (typeof value !== "string" || codePoints(value) < 1 || codePoints(value) > 40_000 || !/\S/u.test(value) || hasExecutableContent(value)) return undefined;
   return value;
 }
 /** @param {unknown} value */
@@ -33,7 +35,7 @@ function url(value) {
 function filename(value) {
   if (typeof value !== "string") return undefined;
   const trimmed = asciiTrim(value);
-  return codePoints(trimmed) >= 1 && codePoints(trimmed) <= 255 ? trimmed : undefined;
+  return codePoints(trimmed) >= 1 && codePoints(trimmed) <= 255 && !hasExecutableContent(trimmed) ? trimmed : undefined;
 }
 /** @param {string} contentType @param {Uint8Array} bytes */
 function signatureMatches(contentType, bytes) {

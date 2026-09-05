@@ -29,6 +29,7 @@ const personalMigration = migration("006-personal-state.sql");
 const feedMigration = migration("007-feeds.sql");
 const moderationMigration = migration("008-moderation.sql");
 const notificationMigration = migration("009-notifications.sql");
+const safetyMigration = migration("010-safety-controls.sql");
 
 /** @param {Database} database */
 function assertCommunityOwnerInvariant(database) {
@@ -535,6 +536,35 @@ function assertNotificationInvariant(database) {
 }
 
 /** @param {Database} database */
+function assertSafetyInvariant(database) {
+  const fail = () => { throw new Error("safety controls invariant is invalid"); };
+  /** @param {string} table */
+  const columns = (table) => database.prepare(`PRAGMA table_info(${table})`).all().map((/** @type {any} */ row) => [row.name, row.type, row.notnull, row.pk]);
+  if (JSON.stringify(columns("user_blocks")) !== JSON.stringify([["blocker_user_id", "TEXT", 1, 1], ["blocked_user_id", "TEXT", 1, 2], ["created_at", "INTEGER", 1, 0]]) ||
+      JSON.stringify(columns("post_creation_events")) !== JSON.stringify([["id", "TEXT", 1, 1], ["user_id", "TEXT", 1, 0], ["post_id", "TEXT", 1, 0], ["created_at", "INTEGER", 1, 0]])) fail();
+  /** @param {string} table */
+  const foreignKeys = (table) => database.prepare(`PRAGMA foreign_key_list(${table})`).all().map((/** @type {any} */ row) => [row.from, row.table, row.to, row.on_delete]).sort();
+  if (JSON.stringify(foreignKeys("user_blocks")) !== JSON.stringify([["blocked_user_id", "users", "id", "NO ACTION"], ["blocker_user_id", "users", "id", "NO ACTION"]]) ||
+      JSON.stringify(foreignKeys("post_creation_events")) !== JSON.stringify([["user_id", "users", "id", "NO ACTION"]])) fail();
+  /** @param {string} name */
+  const sql = (name) => normalizedSql(database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?").get(name)?.sql || "");
+  if (!sql("user_blocks").includes("check (blocker_user_id <> blocked_user_id)") || !sql("user_blocks").includes("check (typeof(created_at) = 'integer' and created_at >= 0)") ||
+      !sql("post_creation_events").includes("check (typeof(created_at) = 'integer' and created_at >= 0)")) fail();
+  const eventIndexes = database.prepare("PRAGMA index_list(post_creation_events)").all();
+  /** @param {string} name @param {number} unique @param {string[]} parts */
+  const hasIndex = (name, unique, parts) => eventIndexes.some((/** @type {any} */ index) => index.name === name && index.unique === unique &&
+    JSON.stringify(database.prepare("SELECT name FROM pragma_index_info(?) ORDER BY seqno").all(name).map((/** @type {any} */ part) => part.name)) === JSON.stringify(parts));
+  if (!hasIndex("post_creation_events_user_created", 0, ["user_id", "created_at"]) || !eventIndexes.some((/** @type {any} */ index) => index.unique === 1 &&
+    JSON.stringify(database.prepare("SELECT name FROM pragma_index_info(?) ORDER BY seqno").all(index.name).map((/** @type {any} */ part) => part.name)) === JSON.stringify(["post_id"]))) fail();
+  const trigger = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = 'post_creation_events_are_immutable'").get()?.sql || "";
+  if (normalizedSql(trigger) !== normalizedSql("CREATE TRIGGER post_creation_events_are_immutable BEFORE UPDATE ON post_creation_events BEGIN SELECT RAISE(ABORT, 'post creation event is immutable'); END")) fail();
+  const invalid = database.prepare(`SELECT 1 FROM user_blocks WHERE blocker_user_id = blocked_user_id OR typeof(created_at) <> 'integer' OR created_at < 0
+    UNION ALL SELECT 1 FROM post_creation_events WHERE typeof(created_at) <> 'integer' OR created_at < 0
+    UNION ALL SELECT 1 FROM (SELECT post_id FROM post_creation_events GROUP BY post_id HAVING COUNT(*) > 1) LIMIT 1`).get();
+  if (invalid || database.prepare("PRAGMA foreign_key_check").get()) fail();
+}
+
+/** @param {Database} database */
 function assertVoteInvariant(database) {
   const voteColumns = /** @type {{name: string, type: string, notnull: number, pk: number}[]} */ (database.prepare("PRAGMA table_info(post_votes)").all());
   const expectedColumns = [
@@ -602,7 +632,7 @@ export function openDatabase(path) {
   try {
     database.exec("PRAGMA foreign_keys = ON; BEGIN IMMEDIATE");
     const version = /** @type {{user_version: number}} */ (database.prepare("PRAGMA user_version").get()).user_version;
-    if (version > 10) throw new Error("Unsupported database schema version");
+    if (version > 11) throw new Error("Unsupported database schema version");
     if (version === 0) {
       database.exec(baselineMigration);
       database.exec("PRAGMA user_version = 1");
@@ -649,6 +679,15 @@ export function openDatabase(path) {
       database.exec(notificationMigration);
       database.exec("PRAGMA user_version = 10");
     }
+    if (version <= 10) {
+      const notificationTableCount = database.prepare(`SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'table' AND name IN
+        ('notification_events', 'notifications', 'notification_traversals', 'notification_traversal_items', 'notification_page_tokens')`).get().count;
+      const safetyTableCount = database.prepare("SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'table' AND name IN ('user_blocks', 'post_creation_events')").get().count;
+      if (notificationTableCount === 5 && safetyTableCount === 0) database.exec(safetyMigration);
+      else if (notificationTableCount === 0 && safetyTableCount === 2) database.exec(notificationMigration);
+      else if (notificationTableCount !== 5 || safetyTableCount !== 2) throw new Error("Ambiguous version 10 database schema");
+      database.exec("PRAGMA user_version = 11");
+    }
     assertCommunityOwnerInvariant(database);
     assertPostInvariant(database);
     assertCommentInvariant(database);
@@ -658,6 +697,7 @@ export function openDatabase(path) {
     assertPersonalInvariant(database);
     assertFeedInvariant(database);
     assertModerationInvariant(database);
+    assertSafetyInvariant(database);
     database.exec("COMMIT");
     return database;
   } catch (error) {

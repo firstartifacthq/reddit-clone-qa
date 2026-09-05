@@ -45,7 +45,7 @@ function withTriggerDisabled(database, name, write) {
 
 test("notification migration installs exact durable owner state and immutable snapshot authority", async () => withDirectory(async (directory) => {
   const path = join(directory, "schema.sqlite"); const database = openDatabase(path);
-  assert.equal(database.prepare("PRAGMA user_version").get().user_version, 10); seedUsers(database);
+  assert.equal(database.prepare("PRAGMA user_version").get().user_version, 11); seedUsers(database);
   seedEvent(database); seedNotification(database); seedTraversal(database);
   database.prepare("INSERT INTO notification_traversal_items (traversal_id, ordinal, notification_id) VALUES ('traversal-a', 0, 'notification-a')").run();
   database.prepare("INSERT INTO notification_page_tokens (token, traversal_id, start_ordinal) VALUES ('token', 'traversal-a', 1)").run();

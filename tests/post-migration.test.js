@@ -15,7 +15,7 @@ test("post migration upgrades version 3 with typed aggregate and retry cascade",
   await withDirectory(async (directory) => {
     const path = join(directory, "posts.sqlite");
     const database = openDatabase(path);
-    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 10);
+    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 11);
     const user = database.prepare("INSERT INTO users (id, username, password_salt, password_verifier, created_at) VALUES (?, ?, ?, ?, ?)");
     user.run("owner", "owner-user", "salt", "verifier", 1);
     database.prepare("INSERT INTO communities (canonical_name, display_name, owner_user_id, created_at) VALUES (?, ?, ?, ?)").run("posts", "Posts", "owner", 1);
@@ -27,7 +27,7 @@ test("post migration upgrades version 3 with typed aggregate and retry cascade",
     assert.equal(database.prepare("PRAGMA integrity_check").get().integrity_check, "ok");
     database.close();
     const reopened = openDatabase(path);
-    assert.equal(reopened.prepare("PRAGMA user_version").get().user_version, 10);
+    assert.equal(reopened.prepare("PRAGMA user_version").get().user_version, 11);
     reopened.close();
   });
 });

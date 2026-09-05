@@ -3,6 +3,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { postRepresentation } from "./post-representation.js";
 import { validateIdempotencyKey, validatePostCreate, validatePostPatch } from "./post-validation.js";
 
+// Seven MiB admits the documented 5 MiB canonical-base64 media envelope plus maximal metadata.
+export const POST_BODY_LIMIT_BYTES = 7 * 1_024 * 1_024;
+
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
 
 /** @param {{exec: (sql: string) => void}} database */
@@ -13,26 +16,35 @@ function rawBytes(body) {
   return typeof body === "string" ? Buffer.from(body) : body instanceof Uint8Array ? body : new Uint8Array();
 }
 /** @param {string | Uint8Array | undefined} body */
-function parseBody(body) { try { return JSON.parse(strictUtf8.decode(rawBytes(body))); } catch { return undefined; } }
+function parseBody(body) {
+  const bytes = rawBytes(body);
+  if (bytes.length > POST_BODY_LIMIT_BYTES) return { kind: "too-large" };
+  try { return { kind: "parsed", value: JSON.parse(strictUtf8.decode(bytes)) }; }
+  catch { return { kind: "invalid" }; }
+}
 /** @param {string | Uint8Array | undefined} body */
 function bodyDigest(body) { return createHash("sha256").update(rawBytes(body)).digest("hex"); }
 
 export class PostService {
-  /** @param {{repository: import("./post-repository.js").PostRepository, database: {exec: (sql: string) => void}, now?: () => number, beforeMediaPersist?: () => void}} options */
-  constructor({ repository, database, now = Date.now, beforeMediaPersist = () => {} }) {
+  /** @param {{repository: import("./post-repository.js").PostRepository, safety: import("../safety/safety-service.js").SafetyService, database: {exec: (sql: string) => void}, now?: () => number, beforeMediaPersist?: () => void}} options */
+  constructor({ repository, safety, database, now = Date.now, beforeMediaPersist = () => {} }) {
     this.repository = repository;
+    this.safety = safety;
     this.database = database;
     this.now = now;
     this.beforeMediaPersist = beforeMediaPersist;
   }
 
-  /** @param {string} userId @param {string} community @param {string | Uint8Array | undefined} rawBody @param {unknown} suppliedKey */
+  /** @param {string} userId @param {string} community @param {string | Uint8Array | undefined} rawBody @param {unknown} suppliedKey
+   * @returns {{kind: "success", post: any} | {kind: "forbidden" | "conflict" | "too-large" | "invalid" | "unavailable" | "enforcement-unavailable"} | {kind: "rate-limited", retryAfterSeconds: number}} */
   create(userId, community, rawBody, suppliedKey) {
     // Admission deliberately precedes parsing so unauthenticated/denied malformed bodies do not disclose validation details.
     if (!this.repository.isPostingMember(community, userId)) return { kind: "forbidden" };
     const key = suppliedKey === undefined ? undefined : validateIdempotencyKey(suppliedKey);
     if (suppliedKey !== undefined && !key) return { kind: "invalid" };
-    const validation = validatePostCreate(parseBody(rawBody));
+    const parsed = parseBody(rawBody);
+    if (parsed.kind === "too-large") return { kind: "too-large" };
+    const validation = validatePostCreate(parsed.kind === "parsed" ? parsed.value : undefined);
     if (validation.kind !== "valid") return validation.kind === "too-large" ? { kind: "too-large" } : { kind: "invalid" };
     const digest = bodyDigest(rawBody);
     try {
@@ -48,11 +60,15 @@ export class PostService {
           return prior.body_digest === digest ? { kind: "success", post: JSON.parse(prior.response_json) } : { kind: "conflict" };
         }
       }
+      const enforcement = this.safety.enforcePostCreation(userId);
+      if (enforcement.kind === "rate-limited") { rollback(this.database); return enforcement; }
+      if (enforcement.kind === "enforcement-unavailable") { rollback(this.database); return enforcement; }
       const id = randomUUID();
       const valid = /** @type {{post: {type: string, title: string, text?: string, url?: string, media?: {filename: string, contentType: string, bytes: Uint8Array}}}} */ (validation);
-      const post = { id, community, authorId: userId, publishedAt: this.now(), ...valid.post };
+      const post = { id, community, authorId: userId, publishedAt: enforcement.createdAt, ...valid.post };
       if (post.type === "media") this.beforeMediaPersist();
       this.repository.createPost(post);
+      this.safety.recordPostCreation(userId, id, enforcement.createdAt);
       const stored = this.repository.findPost(id);
       const representation = postRepresentation(stored);
       if (key) this.repository.createIdempotency({ authorId: userId, community, key, digest, postId: id, snapshot: JSON.stringify(representation) });
@@ -84,7 +100,9 @@ export class PostService {
     const current = this.repository.findPost(id);
     if (!current) return { kind: "not-found" };
     if (current.author_user_id !== userId) return { kind: "forbidden" };
-    const validation = validatePostPatch(current.type, parseBody(rawBody));
+    const parsed = parseBody(rawBody);
+    if (parsed.kind === "too-large") return { kind: "too-large" };
+    const validation = validatePostPatch(current.type, parsed.kind === "parsed" ? parsed.value : undefined);
     if (validation.kind !== "valid") return validation.kind === "too-large" ? { kind: "too-large" } : { kind: "invalid" };
     const valid = /** @type {{patch: {title?: string, text?: string, url?: string, media?: {filename: string, contentType: string, bytes: Uint8Array}}}} */ (validation);
     try {

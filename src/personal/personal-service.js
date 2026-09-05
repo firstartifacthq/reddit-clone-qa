@@ -44,7 +44,7 @@ export class PersonalService {
     try {
       this.database.exec("BEGIN IMMEDIATE");
       if (!this.repository.isActiveUser(userId)) { rollback(this.database); return { kind: "lost-authority" }; }
-      const post = this.repository.findReadablePost(postId);
+      const post = this.repository.findReadablePost(postId, userId);
       if (!post) { rollback(this.database); return { kind: "not-found" }; }
       const now = this.now(); this.beforeHistoryPersist(); this.repository.view(userId, postId, now); this.repository.expireHistory(userId, now - 90 * DAY_MS);
       this.database.exec("COMMIT"); return { kind: "success", post: postRepresentation(post) };
