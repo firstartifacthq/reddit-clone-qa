@@ -49,7 +49,7 @@ test("feed migration upgrades a version 7 post with a stable publication time", 
 
   const upgraded = openDatabase(path);
   const published = upgraded.prepare("SELECT published_at FROM posts WHERE id = 'post'").get().published_at;
-  assert.equal(upgraded.prepare("PRAGMA user_version").get().user_version, 12);
+  assert.equal(upgraded.prepare("PRAGMA user_version").get().user_version, 13);
   assert.equal(Number.isInteger(published) && published >= 0, true);
   upgraded.close();
 }));
@@ -57,7 +57,7 @@ test("feed migration upgrades a version 7 post with a stable publication time", 
 test("feed migration creates exact immutable durable feed state", async () => withDirectory(async (directory) => {
   const path = join(directory, "feed.sqlite");
   const database = openDatabase(path);
-  assert.equal(database.prepare("PRAGMA user_version").get().user_version, 12);
+  assert.equal(database.prepare("PRAGMA user_version").get().user_version, 13);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'table' AND name IN ('feed_traversals', 'feed_traversal_items', 'feed_page_tokens')").get().count, 3);
   seedAuthority(database);
 

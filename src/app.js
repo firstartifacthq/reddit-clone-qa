@@ -1,4 +1,6 @@
 import { openDatabase } from "./database.js";
+import { createReadiness, durableCapability } from "./readiness.js";
+import { operationalRequest, operationalResponse } from "./operational-http.js";
 import { createConfig, POST_RATE_LIMIT_RETENTION_MS } from "./config.js";
 import { AuthRepository } from "./auth/auth-repository.js";
 import { AuthService } from "./auth/auth-service.js";
@@ -194,8 +196,22 @@ export function createApp(options = {}) {
   const privacy = new PrivacyService({ repository: privacyRepository, database, now, identifier, beforeAcceptance: beforePrivacyAcceptance });
   const privacyWorker = new PrivacyWorker({ service: privacy, repository: privacyRepository, beforePhase: beforePrivacyPhase });
   const isAdministrator = administratorAuthority || ((candidate) => config.administratorIds.has(candidate.id));
-  const scheduleWork = schedulePrivacyWork || ((work) => setTimeout(work, 0));
-  const schedulePrivacy = () => scheduleWork(() => privacyWorker.drain());
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let privacyTimer;
+  let privacyScheduled = false;
+  const schedulePrivacy = () => {
+    // Preserve externally owned delivery notifications; coalesce the owned timer.
+    if (schedulePrivacyWork) { schedulePrivacyWork(() => privacyWorker.drain()); return; }
+    if (privacyScheduled || privacyWorker.closed) return;
+    privacyScheduled = true;
+    privacyTimer = setTimeout(() => { privacyScheduled = false; privacyWorker.drain(); }, 0);
+    // @ts-expect-error Node timers expose unref; the ambient library describes browser timers.
+    privacyTimer.unref();
+  };
+  const readiness = createReadiness({
+    check: durableCapability(database, injectedDatabase ? ":memory:" : config.databasePath),
+    onReady: () => { if (!schedulePrivacyWork) schedulePrivacy(); },
+  });
   const deliveryCapability = Symbol("notification delivery capability");
   const ownDatabase = !injectedDatabase;
 
@@ -211,6 +227,8 @@ export function createApp(options = {}) {
     try {
       const method = (request.method || "GET").toUpperCase();
       const url = new URL(request.path || "/", "http://localhost");
+      const operational = operationalRequest(method, request.path);
+      if (operational) return operationalResponse(operational, readiness);
       const headers = headersFacade(request.headers || {});
       const token = parseCookies(headers.cookie)[config.cookieName];
       const account = auth.resolve(token);
@@ -701,9 +719,10 @@ export function createApp(options = {}) {
     },
     config,
     database,
+    readiness,
     /** Trusted in-process test/recovery seam; no HTTP worker-control operation exists. */
     drainPrivacy: () => privacyWorker.drain(),
     accountCount: () => authRepository.accountCount(),
-    close: () => { privacyWorker.close(); if (ownDatabase) database.close(); },
+    close: () => { readiness.close(); clearTimeout(privacyTimer); privacyWorker.close(); if (ownDatabase) { try { database.close(); } catch {} } },
   };
 }
