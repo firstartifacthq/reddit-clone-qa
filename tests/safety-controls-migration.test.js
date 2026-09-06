@@ -10,7 +10,7 @@ test("safety controls migrate a populated target version 10 database and persist
   const directory = await mkdtemp(join(tmpdir(), "reddit-safety-migration-")); const path = join(directory, "database.sqlite");
   try {
     const legacy = new DatabaseSync(path); for (const name of ["001-auth.sql", "002-profile-lifecycle.sql", "003-community-roles.sql", "004-posts.sql", "005-comments.sql", "006-votes.sql", "006-personal-state.sql", "007-feeds.sql", "008-moderation.sql", "009-notifications.sql"]) legacy.exec(await readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8")); legacy.exec("PRAGMA user_version = 10"); legacy.prepare("INSERT INTO users (id, username, password_salt, password_verifier, created_at) VALUES (?, ?, ?, ?, ?)").run("owner", "owner", "salt", "verifier", 0); legacy.close();
-    const upgraded = openDatabase(path); assert.equal(upgraded.prepare("PRAGMA user_version").get().user_version, 12); assert.deepEqual(upgraded.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('user_blocks', 'post_creation_events') ORDER BY name").all().map((row) => row.name), ["post_creation_events", "user_blocks"]); upgraded.close();
+    const upgraded = openDatabase(path); assert.equal(upgraded.prepare("PRAGMA user_version").get().user_version, 13); assert.deepEqual(upgraded.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('user_blocks', 'post_creation_events') ORDER BY name").all().map((row) => row.name), ["post_creation_events", "user_blocks"]); upgraded.close();
     const reopened = openDatabase(path); assert.equal(reopened.prepare("SELECT COUNT(*) AS count FROM users").get().count, 2); reopened.close();
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
@@ -19,7 +19,7 @@ test("integration migration completes a candidate version 10 safety database wit
   const directory = await mkdtemp(join(tmpdir(), "reddit-safety-candidate-migration-")); const path = join(directory, "database.sqlite");
   try {
     const legacy = new DatabaseSync(path); for (const name of ["001-auth.sql", "002-profile-lifecycle.sql", "003-community-roles.sql", "004-posts.sql", "005-comments.sql", "006-votes.sql", "006-personal-state.sql", "007-feeds.sql", "008-moderation.sql", "010-safety-controls.sql"]) legacy.exec(await readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8")); legacy.exec("PRAGMA user_version = 10"); legacy.close();
-    const upgraded = openDatabase(path); assert.equal(upgraded.prepare("PRAGMA user_version").get().user_version, 12); assert.equal(upgraded.prepare("SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'table' AND name IN ('notification_events', 'notifications', 'notification_traversals', 'notification_traversal_items', 'notification_page_tokens', 'user_blocks', 'post_creation_events')").get().count, 7); upgraded.close();
+    const upgraded = openDatabase(path); assert.equal(upgraded.prepare("PRAGMA user_version").get().user_version, 13); assert.equal(upgraded.prepare("SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'table' AND name IN ('notification_events', 'notifications', 'notification_traversals', 'notification_traversal_items', 'notification_page_tokens', 'user_blocks', 'post_creation_events')").get().count, 7); upgraded.close();
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

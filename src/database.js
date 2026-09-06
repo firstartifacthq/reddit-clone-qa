@@ -11,7 +11,7 @@ import { DatabaseSync } from "node:sqlite";
  * @property {() => void} close
  */
 
-/** @param {string} name */
+/** @param {string} name @returns {string} */
 function migration(name) {
   return readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8")
     .replace("CREATE TABLE users", "CREATE TABLE IF NOT EXISTS users")
@@ -31,6 +31,22 @@ const moderationMigration = migration("008-moderation.sql");
 const notificationMigration = migration("009-notifications.sql");
 const safetyMigration = migration("010-safety-controls.sql");
 const privacyMigration = migration("011-privacy-rights.sql");
+const readinessMigration = migration("012-readiness.sql");
+
+/** @param {Database} database */
+function assertReadinessInvariant(database) {
+  const expected = readinessMigration.split(";").map(part => part.trim());
+  const table = database.prepare("SELECT sql FROM sqlite_schema WHERE name='operational_capability' AND type='table'").get();
+  if (normalizedSql(table?.sql || "") !== normalizedSql(expected[0])) throw new Error("readiness invariant is invalid");
+  for (const name of ["operational_capability_cannot_delete", "operational_capability_identity"]) {
+    const actual = database.prepare("SELECT sql FROM sqlite_schema WHERE type='trigger' AND name=?").get(name)?.sql || "";
+    const start = readinessMigration.indexOf(`CREATE TRIGGER ${name} `);
+    const end = readinessMigration.indexOf("END;", start) + 3;
+    if (normalizedSql(actual) !== normalizedSql(readinessMigration.slice(start, end))) throw new Error("readiness invariant is invalid");
+  }
+  const rows = database.prepare("SELECT id, pulse FROM operational_capability").all();
+  if (rows.length !== 1 || rows[0].id !== 1 || ![0, 1].includes(rows[0].pulse)) throw new Error("readiness invariant is invalid");
+}
 
 /** @param {Database} database */
 function assertCommunityOwnerInvariant(database) {
@@ -780,7 +796,7 @@ export function openDatabase(path) {
   try {
     database.exec("PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON; BEGIN IMMEDIATE");
     const version = /** @type {{user_version: number}} */ (database.prepare("PRAGMA user_version").get()).user_version;
-    if (version > 12) throw new Error("Unsupported database schema version");
+    if (version > 13) throw new Error("Unsupported database schema version");
     if (version === 0) {
       database.exec(baselineMigration);
       database.exec("PRAGMA user_version = 1");
@@ -840,6 +856,11 @@ export function openDatabase(path) {
       database.exec(privacyMigration);
       database.exec("PRAGMA user_version = 12");
     }
+    if (version <= 12) {
+      database.exec(readinessMigration);
+      database.exec("PRAGMA user_version = 13");
+    }
+    assertReadinessInvariant(database);
     assertCommunityOwnerInvariant(database);
     assertPostInvariant(database);
     assertCommentInvariant(database);
