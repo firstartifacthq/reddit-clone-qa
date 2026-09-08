@@ -90,7 +90,7 @@ export class PrivacyService {
       this.database.exec("BEGIN IMMEDIATE");
       let traversalId; let maximum; let after;
       if (cursor) {
-        const saved = this.repository.traversal(cursor, administrator);
+        const saved = this.repository.traversal(cursor, administrator, this.now());
         if (!saved) { rollback(this.database); return undefined; }
         ({ maximum_sequence: maximum, next_sequence: after } = saved);
         traversalId = saved.id;

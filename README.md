@@ -97,6 +97,13 @@ These are candidate observations, not the operator's infrastructure smoke result
 The diagnostic uses private short XDG runtime paths to respect Unix socket path limits,
 then retains its artifacts under the evidence directory and stops only owned processes.
 
+## Full-system capstone (RC-15)
+
+The [RC-15 implementation evidence map](docs/rc15-qualification.md) records the
+candidate-bound connected journeys, three reproduced integration repairs, final local
+suite/load results and separate native accessibility observations. It is a handoff
+for independent Factory qualification, not an acceptance or campaign-closure receipt.
+
 ## Privacy rights (RC-13)
 
 Authenticated owners may request an export with `POST /api/me/export`, inspect it at

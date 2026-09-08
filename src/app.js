@@ -565,6 +565,7 @@ export function createApp(options = {}) {
         const result = posts.create(account.id, postCommunity, request.payload, headers["idempotency-key"]);
         if (result.kind === "success") return json(201, result.post);
         if (result.kind === "forbidden") return json(403, forbiddenError);
+        if (result.kind === "not-found") return json(404, notFoundError);
         if (result.kind === "conflict") return json(409, postConflictError);
         if (result.kind === "too-large") return json(413, invalidPostError);
         if (result.kind === "invalid") return json(422, invalidPostError);
@@ -652,7 +653,7 @@ export function createApp(options = {}) {
       const postRoute = postPath(url.pathname);
       if (postRoute && method === "GET") {
         if (postRoute.media) {
-          const media = posts.media(postRoute.id);
+          const media = posts.media(postRoute.id, account?.id);
           return media ? binary(media.media_content_type, media.media_bytes) : json(404, notFoundError);
         }
         if (!account) {

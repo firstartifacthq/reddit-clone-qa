@@ -36,7 +36,7 @@ export class PostService {
   }
 
   /** @param {string} userId @param {string} community @param {string | Uint8Array | undefined} rawBody @param {unknown} suppliedKey
-   * @returns {{kind: "success", post: any} | {kind: "forbidden" | "conflict" | "too-large" | "invalid" | "unavailable" | "enforcement-unavailable"} | {kind: "rate-limited", retryAfterSeconds: number}} */
+   * @returns {{kind: "success", post: any} | {kind: "forbidden" | "not-found" | "conflict" | "too-large" | "invalid" | "unavailable" | "enforcement-unavailable"} | {kind: "rate-limited", retryAfterSeconds: number}} */
   create(userId, community, rawBody, suppliedKey) {
     // Admission deliberately precedes parsing so unauthenticated/denied malformed bodies do not disclose validation details.
     if (!this.repository.isPostingMember(community, userId)) return { kind: "forbidden" };
@@ -56,7 +56,10 @@ export class PostService {
       if (key) {
         const prior = this.repository.findIdempotency(userId, community, key);
         if (prior) {
+          // A retained response is not authority to disclose a now-removed target.
+          const readable = this.repository.findPost(prior.post_id);
           rollback(this.database);
+          if (!readable) return { kind: "not-found" };
           return prior.body_digest === digest ? { kind: "success", post: JSON.parse(prior.response_json) } : { kind: "conflict" };
         }
       }
@@ -92,8 +95,8 @@ export class PostService {
 
   /** @param {string} id */
   get(id) { const post = this.repository.findPost(id); return post ? postRepresentation(post) : undefined; }
-  /** @param {string} id */
-  media(id) { return this.repository.findMedia(id); }
+  /** @param {string} id @param {string} [requesterId] */
+  media(id, requesterId) { return this.repository.findMedia(id, requesterId); }
 
   /** @param {string} userId @param {string} id @param {string | Uint8Array | undefined} rawBody */
   edit(userId, id, rawBody) {

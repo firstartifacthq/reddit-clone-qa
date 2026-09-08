@@ -11,8 +11,11 @@ export class PostRepository {
       JOIN users ON users.id = membership.user_id AND users.deletion_requested_at IS NULL
       WHERE membership.community_name = ? AND membership.user_id = ?`);
     this.postById = database.prepare(`SELECT posts.*, users.username FROM readable_posts AS posts JOIN users ON users.id = posts.author_user_id WHERE posts.id = ?`);
-    this.mediaById = database.prepare("SELECT media_content_type, media_bytes FROM readable_posts WHERE id = ? AND type = 'media'");
-    this.idempotencyByKey = database.prepare("SELECT body_digest, response_json FROM post_idempotency WHERE author_user_id = ? AND community_name = ? AND idempotency_key = ?");
+    this.mediaById = database.prepare(`SELECT media_content_type, media_bytes FROM readable_posts
+      WHERE id = ? AND type = 'media' AND NOT EXISTS (
+        SELECT 1 FROM user_blocks WHERE blocker_user_id = readable_posts.author_user_id AND blocked_user_id = ?
+      )`);
+    this.idempotencyByKey = database.prepare("SELECT body_digest, response_json, post_id FROM post_idempotency WHERE author_user_id = ? AND community_name = ? AND idempotency_key = ?");
     this.insertPost = database.prepare(`INSERT INTO posts (id, community_name, author_user_id, type, title, text_content, url_content, media_filename, media_content_type, media_bytes, published_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     this.insertIdempotency = database.prepare(`INSERT INTO post_idempotency (author_user_id, community_name, idempotency_key, body_digest, post_id, response_json)
@@ -29,8 +32,8 @@ export class PostRepository {
   isPostingMember(community, userId) { return Boolean(this.postingMember.get(community, userId)); }
   /** @param {string} id */
   findPost(id) { return this.postById.get(id); }
-  /** @param {string} id */
-  findMedia(id) { return this.mediaById.get(id); }
+  /** @param {string} id @param {string} [requesterId] */
+  findMedia(id, requesterId = "") { return this.mediaById.get(id, requesterId); }
   /** @param {string} userId @param {string} community @param {string} key */
   findIdempotency(userId, community, key) { return this.idempotencyByKey.get(userId, community, key); }
   /** @param {{id: string, community: string, authorId: string, type: string, title: string, text?: string, url?: string, media?: {filename: string, contentType: string, bytes: Uint8Array}, publishedAt: number}} post */

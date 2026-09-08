@@ -1,0 +1,11 @@
+# RC15 recovery handoff
+
+This branch reconstructs only the implementation produced during the fresh 2026-09-08 execution request-a695d5d2dc9804a0cef9910e76302dd4. It contains no candidate or plan from earlier RC15 attempts. The baseline is af62617ae47d2fccd94dcdb8ba3154ec4a06fbf7.
+
+The restored src/migrations/tools/tests/package fingerprint is exactly 3e79b2fc5a6910af9d77f601aa09720e94af38ea5fe172804e7131c1023a0386, matching that execution's passing 317 tests and 100-user 300-second load run. Its native journeys also passed. These are historical developer observations, not independent acceptance of this branch. Original runtime artifacts were removed by terminal lease cleanup. Reproduce required evidence in the provisioned execution, update docs/rc15-qualification.md accordingly, and complete Factory qualification, independent verification, and canonical integration.
+
+The failure was a completion-metadata defect: technologyDecisionAdherence.evidence used explanatory prose in a repo reference (for example combining package.json and package-lock.json into one string). Supply each exact existing path separately, such as repo:package.json and repo:package-lock.json. Put explanation in summary/completionEvidence fields. Check every repository evidence path with git cat-file before submitting. Do not change the approved technology strategy.
+
+Native harness recovery: copy native-run.sh and native-observe.mjs from this directory to .crabbox/evidence/rc15/, then execute the script from repository root inside the provisioned native image. It uses the allowed /tmp/software-factory runtime directory for D-Bus, explicit AT-SPI data discovery and espeak module configuration. Check the pinned paths against the provisioned image. The viewport tolerance is one pixel to accommodate browser rounding; focus visibility, hit testing, keyboard behavior, zoom, speech logs and audio remain required.
+
+The fresh reconstructed local test run passed 316 tests; its only failure was the sealed-browser test because the ordinary host checkout lacks the provisioned Playwright package. The next provisioned run must execute it successfully.
