@@ -1,0 +1,742 @@
+{
+  "schemaVersion": "agent-output.v1",
+  "role": "discovery_plan",
+  "status": "succeeded",
+  "summary": "Read-only discovery maps all 26 criteria to incumbent source boundaries and discriminating verification. Prioritize the verified privacy-audit expiry omission and reproduce stale keyed-post replay, current-visibility and cross-owner erasure risks. No implementation or product qualification was performed. Final independent gates and native observations remain required.",
+  "evidenceRefs": [
+    "repo:README.md",
+    "repo:package.json",
+    "repo:.dagger/src/index.ts",
+    "repo:src/app.js",
+    "repo:src/privacy/privacy-service.js",
+    "repo:src/privacy/privacy-repository.js",
+    "repo:src/post/post-service.js",
+    "repo:src/post/post-repository.js",
+    "repo:src/auth/auth-repository.js",
+    "repo:src/community/community-repository.js",
+    "repo:src/personal/personal-repository.js",
+    "repo:src/readiness.js",
+    "repo:src/server.js",
+    "repo:tests/privacy-rights-audit.test.js",
+    "repo:tests/privacy-rights-export.test.js",
+    "repo:tests/privacy-rights-erasure.test.js",
+    "repo:tests/rc14-recovery.test.js",
+    "repo:tests/rc14-browser.test.js",
+    "repo:tools/rc14-browser.js",
+    "repo:tools/rc14-load.js"
+  ],
+  "data": {
+    "completionContract": "planning-completion.v1",
+    "goal": "Qualify one final RC-15 candidate across the complete RC-01 through RC-14 inventory and every sealed RC-15 criterion, repairing demonstrated integration defects within existing local product and authority boundaries and obtaining fresh independent behavioral, security, maintainability and qualification evidence.",
+    "criterionMap": [
+      {
+        "criterionId": "AC-RC15-1",
+        "invariant": "Connected account, membership, content and dependent-effect identities agree across interfaces and restart, with unrelated state isolated.",
+        "affectedPaths": [
+          "src/app.js",
+          "src/profile/profile-service.js",
+          "src/community/community-service.js",
+          "src/post/post-service.js",
+          "src/comment/comment-service.js",
+          "src/vote/vote-service.js",
+          "src/feed/feed-service.js",
+          "src/search/search-service.js",
+          "src/notification/notification-service.js",
+          "src/personal/personal-service.js",
+          "tools/rc15-fixture.js",
+          "tests/rc15-participation.test.js"
+        ],
+        "hypothesis": "Extend existing local HTTP/process fixture conventions with distinct owner, participant and recipient accounts in two communities and explicit independent expected ledgers. Compose ordinary operations, not a synthetic journey API. Existing feature tests and partial RC-14 recovery coverage are supporting evidence only.",
+        "completionEvidence": "Compare authentication, identity-preserving profile edits, membership, text/link/media posts and bytes, replies, vote/karma contributions, scoped Home and other feeds, literal typed search, reports, eligible notifications, saves/history/preferences across the same identities before and after restart. Other accounts and the second community have only intentionally issued changes.",
+        "requirement": "While users and communities are active, when users perform the connected participation journey, the system shall expose mutually consistent durable identities and outcomes across authentication, profile edits, community participation, all three post types, comments/replies, votes, discovery, reporting, notifications, saved posts, history and preferences."
+      },
+      {
+        "criterionId": "AC-RC15-2",
+        "invariant": "Retained traversal preserves initial eligible order while current visibility and authority can remove candidates; no duplicates, later insertions or stale disclosure.",
+        "affectedPaths": [
+          "src/feed/feed-repository.js",
+          "src/comment/comment-repository.js",
+          "src/moderation/moderation-repository.js",
+          "src/notification/notification-repository.js",
+          "src/personal/personal-repository.js",
+          "src/privacy/privacy-repository.js",
+          "src/privacy/privacy-service.js",
+          "tests/privacy-rights-audit.test.js",
+          "tests/rc15-pagination.test.js"
+        ],
+        "hypothesis": "Use table-driven family adapters and independent initial inventories. Repair verified audit expiry omission: createTraversal stores expires_at but traversal/audit resume never checks it; pass trusted now and reject expires_at <= now without committed cleanup. Reproduce other visibility gaps before narrow fixes. Preserve existing retained Home membership snapshot semantics while fresh Home uses current membership.",
+        "completionEvidence": "Cover feeds, comments, moderation, notifications, saved, history and privacy audit at empty/one/exact/multiple pages, limits 1/100 and defaults 25/audit50. Assert specified feed tie-breaks and depth-first comment creation/identity order, and initial ordered inventories for other families. Insert/rerank, replay, restart, remove content and revoke authority before resume; require every still-eligible candidate once, no later/stale content. Test expiring families at 24h-1ms, 24h, 24h+1ms with valid sessions; refusal changes no user state and fresh traversal works. Do not add comment TTL.",
+        "requirement": "While page-family content spans page boundaries, when an authorized actor traverses or replays pages, the system shall return the complete eligible snapshot in its deterministic order without duplicate identities or unauthorized content."
+      },
+      {
+        "criterionId": "AC-RC15-2A",
+        "invariant": "One complete issued-request population determines correctness, failure rate and nearest-rank p95 for the fixed workload.",
+        "affectedPaths": [
+          "tools/rc14-load.js",
+          "tools/rc14-fixture.js",
+          "tools/rc14-process-fixture.js",
+          "tests/rc14-measurement.test.js",
+          "docs/rc15-qualification.md"
+        ],
+        "hypothesis": "Retain existing runner: source verifies 100 distinct accounts, four eligibility cohorts, 300000ms closed-loop issue interval, exact response comparison, bounded settlement and complete outcome accounting. Add explicit settled/issue-end receipt fields only if needed; do not change workload or denominator. Run final candidate without competing load.",
+        "completionEvidence": "Fresh candidate/runtime-bound receipt covers first-only/second-only/both/empty cohorts, uninterrupted 300 seconds, per-user activity, issued/settled/outstanding and failed/incorrect/timed-out/slow-tail accounting. Recompute failures/issued < 0.01 and sorted latency at ceil(0.95*issued)-1 < 750ms on the same population. Equality, interruption or missing outcomes fails; retain measurement-boundary regressions.",
+        "requirement": "While 100 distinct authenticated users continuously exercise core feed reads for 300 seconds, the system shall maintain a failure rate strictly below 1 percent and nearest-rank p95 latency strictly below 750 milliseconds over the same complete issued-request population."
+      },
+      {
+        "criterionId": "AC-RC15-2B",
+        "invariant": "Contention converges to legal single-resource state without multiplying delivery or losing unrelated acknowledgements.",
+        "affectedPaths": [
+          "src/community/community-repository.js",
+          "src/vote/vote-service.js",
+          "src/personal/personal-service.js",
+          "src/moderation/moderation-service.js",
+          "src/notification/notification-service.js",
+          "tests/community-join-worker.js",
+          "tests/vote-worker.js",
+          "tests/rc15-concurrency.test.js"
+        ],
+        "hypothesis": "Use real competing connections/processes and ordinary retries following existing worker conventions. Existing transactions/uniqueness and conflict-do-nothing joins support convergence. Evaluate vote histories against possible serial orders. Internal delivery retries use only the trusted seam, not a new HTTP capability.",
+        "completionEvidence": "Concurrent joins preserve one membership/role, saves one owner/post entry, reports one actor/target report, and retries one notification per eligible event/recipient. Vote assignments/clears admit a serial order with at most one current contribution and exact final score/karma. Unrelated acknowledged operations survive contention and restart.",
+        "requirement": "When concurrent or repeated operations target the same membership, current vote, save, report or eligible notification event, the system shall converge on the legal single-resource result rather than multiplying user-visible effects."
+      },
+      {
+        "criterionId": "AC-RC15-3",
+        "invariant": "Invalid input/transitions cause no partial business effects or protected output and do not poison later valid work.",
+        "affectedPaths": [
+          "src/app.js",
+          "src/http-errors.js",
+          "src/post/post-validation.js",
+          "src/comment/comment-validation.js",
+          "src/personal/personal-validation.js",
+          "src/privacy/privacy-validation.js",
+          "tests/rc15-authority.test.js",
+          "tests/rc15-lifecycle.test.js"
+        ],
+        "hypothesis": "Extend per-feature validation with full before/after ledgers and preserve admission ordering and feature-specific fixed errors rather than imposing one status.",
+        "completionEvidence": "Refuse malformed content, cross-post reply parents, invalid preferences, foreign/wrong-family cursors, 0/101 limits, malformed size representations, duplicate paging inputs, self-export owner overrides and mutations of unavailable/removed/deleted targets. Content, votes, reports, notifications, preferences, memberships and jobs remain unchanged. Errors reveal no protected markers/credentials/diagnostics; subsequent valid work commits exactly its full effect.",
+        "requirement": "When a cross-feature request is malformed, contradictory, targets an unavailable object or attempts an invalid transition, the system shall refuse it without any partial business effect or protected disclosure."
+      },
+      {
+        "criterionId": "AC-RC15-3A",
+        "invariant": "Safety admission precedes post/history/delivery effects and preserves unrelated allowed access.",
+        "affectedPaths": [
+          "src/safety/safety-service.js",
+          "src/safety/safety-repository.js",
+          "src/post/post-validation.js",
+          "src/post/post-service.js",
+          "src/personal/personal-service.js",
+          "src/personal/personal-repository.js",
+          "src/app.js",
+          "tests/safety-controls-flow.test.js",
+          "tests/rc15-authority.test.js"
+        ],
+        "hypothesis": "Use trusted clocks/configuration for posting limits and ordinary block operations. Direct readAndRecord checks directional blocks, but listing/save code inconsistently passes requester context; reproduce protected-payload exposure and repair only demonstrated boundaries. Do not invent post-created notification behavior.",
+        "completionEvidence": "Accept inclusive request M, reject M+1 and accept after window expiry. Script/event-handler content and unsafe schemes create no post or associated notification/partial transaction. Author-to-actor blocking prevents protected payload reads and history from refused reads, including fresh/retained surfaces exposing that payload. Unrelated actors and later safe operations work. Refusals omit unsafe submitted content and diagnostics.",
+        "requirement": "When unsafe content, exhausted posting capacity or a directional block applies, the system shall enforce the existing safety boundary before creating downstream user-visible effects."
+      },
+      {
+        "criterionId": "AC-RC15-4",
+        "invariant": "Current sessions, ownership and scoped roles govern protected actions; independently granted site authority never implies private-data ownership.",
+        "affectedPaths": [
+          "src/app.js",
+          "src/auth/auth-repository.js",
+          "src/community/community-service.js",
+          "src/moderation/moderation-service.js",
+          "src/privacy/privacy-service.js",
+          "src/personal/personal-service.js",
+          "src/notification/notification-service.js",
+          "tests/privacy-rights-authorization.test.js",
+          "tests/rc15-authority.test.js"
+        ],
+        "hypothesis": "Build explicit anonymous/nonmember/member/local-and-foreign-moderator/owner/current-and-former-admin matrices. Grant administration only through existing trusted local configuration. Recheck authority on resumes/mutations rather than accepting claimed roles or token possession.",
+        "completionEvidence": "Prove admitted participation, author-only edits, community-only moderation, owner-only eligible role assignment, owner-only private lists/notifications/exports and admin-only intended site operations/audit. Owners/moderators cannot grant site powers or delete other accounts; administrators cannot read foreign exports/lists. Forged headers/body/profile fields and stale cursors confer nothing. Denials preserve targets/effects and disclose no privileged information or credentials.",
+        "requirement": "When any role attempts a protected operation or read, the system shall enforce current authentication, content ownership, community scope, personal-data ownership and independently granted site-administrator authority before exposing protected data or changing state."
+      },
+      {
+        "criterionId": "AC-RC15-4A",
+        "invariant": "Expired/revoked/restricted credentials cannot regain authenticated capability or affect another valid session.",
+        "affectedPaths": [
+          "src/auth/auth-repository.js",
+          "src/auth/auth-service.js",
+          "src/app.js",
+          "src/privacy/privacy-service.js",
+          "tests/auth-flow.test.js",
+          "tests/rc15-authority.test.js"
+        ],
+        "hypothesis": "AuthRepository already rejects revoked sessions, expires_at <= now and restricted accounts. Compose these checks across Home/posting/personal/rights with retained credentials and trusted clock.",
+        "completionEvidence": "Credentials work immediately before expiry and fail at/after it; logout replay fails across feature families. Active-account fresh login succeeds without reviving old credentials. Deletion revokes every target session and prevents new login. Another valid user's session continues ordinary operations.",
+        "requirement": "When a session expires, is logged out or loses account authority, the system shall refuse further authenticated actions using that session without affecting another valid user's session."
+      },
+      {
+        "criterionId": "AC-RC15-5",
+        "invariant": "Removal suppresses the same post/dependent payload everywhere, prohibits dependent mutations and records one immutable removal.",
+        "affectedPaths": [
+          "src/moderation/moderation-service.js",
+          "src/moderation/moderation-repository.js",
+          "src/post/post-service.js",
+          "src/post/post-repository.js",
+          "src/comment/comment-service.js",
+          "src/feed/feed-repository.js",
+          "src/personal/personal-repository.js",
+          "tests/rc15-lifecycle.test.js"
+        ],
+        "hypothesis": "Populate media/conversation/votes/reports/saves/history/notifications and retain references/pages. Existing readable_posts and moderation transactions provide the boundary. Keyed create replay returns cached response_json without current visibility checks: reproduce removal replay, then fix admission without breaking active-post idempotency.",
+        "completionEvidence": "Direct post/media/conversation and fresh/retained feeds/search/personal/notification-target reads disclose no removed payload; dependent edits/replies/votes fail. Cached keyed replay cannot leak removed content. Existing event IDs may remain but cannot reveal removed payload. Audit has one removal and repeated removal adds no audit/delivery; unrelated content remains readable.",
+        "requirement": "While a post is active, when its authorized moderator removes it, the system shall make the post and its dependent content unavailable through all read surfaces while retaining one ordered immutable moderation event."
+      },
+      {
+        "criterionId": "AC-RC15-5A",
+        "invariant": "Restoration reverses moderation visibility under the same identity, never deletion/erasure or dependent-resource identity.",
+        "affectedPaths": [
+          "src/moderation/moderation-service.js",
+          "src/moderation/moderation-repository.js",
+          "src/post/post-repository.js",
+          "src/comment/comment-repository.js",
+          "tests/rc15-lifecycle.test.js"
+        ],
+        "hypothesis": "Reuse populated removal fixture and current restore transition; compare ordinary surfaces without recreating content. Include author-deleted/erased controls.",
+        "completionEvidence": "Authorized restore exposes original still-existing payload/media/conversation on permitted direct/discovery/personal surfaces. Audit is immutable removal-then-restoration. Comments/votes/saves/notifications retain identities/counts and duplicate restore adds nothing. Deleted/erased content cannot be revived.",
+        "requirement": "While a post is moderator-removed but not author-deleted or privacy-erased, when an authorized moderator restores it, the system shall restore its permitted read visibility under the same identity and append one restoration event."
+      },
+      {
+        "criterionId": "AC-RC15-5B",
+        "invariant": "Promotion changes only an active nonowner member's selected community role, not account identity or site authority.",
+        "affectedPaths": [
+          "src/community/community-service.js",
+          "src/community/community-repository.js",
+          "src/moderation/moderation-service.js",
+          "tests/community-flow.test.js",
+          "tests/rc15-authority.test.js"
+        ],
+        "hypothesis": "Existing role update targets member/moderator rows and active accounts. Exercise owner operation and compare account/composite membership identities.",
+        "completionEvidence": "Promoted actor moderates only that community; account/membership identity persists. Repetition is stable, other members/communities unchanged and site authority denied. Inactive/nonmember/owner targets are not reassigned, with no collateral effects.",
+        "requirement": "While an active user is an ordinary member, when the community owner promotes that member, the system shall change only that member's role to moderator for that community."
+      },
+      {
+        "criterionId": "AC-RC15-5C",
+        "invariant": "Demotion immediately invalidates scoped moderation while preserving ordinary membership and other roles.",
+        "affectedPaths": [
+          "src/community/community-service.js",
+          "src/moderation/moderation-service.js",
+          "src/moderation/moderation-repository.js",
+          "tests/rc15-authority.test.js",
+          "tests/rc15-pagination.test.js"
+        ],
+        "hypothesis": "Retain a queue cursor before demotion and test listing and mutation admission afterward; existing authority scoping should reject stale capabilities.",
+        "completionEvidence": "Demoted actor remains a participant but cannot resume the privileged queue or remove/restore with old session/cursor. Targets/audit remain unchanged on denial. Role reads show member; independently granted other-community roles remain unchanged.",
+        "requirement": "While a member is a moderator, when the community owner demotes that member, the system shall retain ordinary membership and immediately remove that community's moderation authority."
+      },
+      {
+        "criterionId": "AC-RC15-5D",
+        "invariant": "Leave removes only nonowner membership/scoped authority; leave/join retries cannot orphan or downgrade ownership.",
+        "affectedPaths": [
+          "src/community/community-repository.js",
+          "src/community/community-service.js",
+          "src/feed/feed-repository.js",
+          "src/moderation/moderation-service.js",
+          "tests/community-flow.test.js",
+          "tests/feed-flow.test.js",
+          "tests/rc15-authority.test.js"
+        ],
+        "hypothesis": "Source limits leave to member/moderator and joins are conflict-do-nothing. Compose fresh Home and mutation checks while preserving established retained public-feed snapshots.",
+        "completionEvidence": "Member/moderator leave affects only selected membership and repeated leave is stable. Fresh Home eligibility and community mutation authority change. Rejoin restores ordinary membership, not moderation. Owner leave/rejoin preserves ownership/shared structure and unrelated memberships.",
+        "requirement": "When a non-owner leaves a community, the system shall remove only that actor's membership and its dependent community authority; an owner's leave request shall preserve ownership."
+      },
+      {
+        "criterionId": "AC-RC15-5E",
+        "invariant": "Export acceptance durably captures one pending owner-scoped snapshot, excluding later changes and protected credentials.",
+        "affectedPaths": [
+          "src/privacy/privacy-service.js",
+          "src/privacy/privacy-repository.js",
+          "src/privacy/privacy-representation.js",
+          "tests/privacy-rights-export.test.js",
+          "tests/rc15-lifecycle.test.js",
+          "tools/rc15-fixture.js"
+        ],
+        "hypothesis": "Existing acceptance transaction snapshots data and deduplicates pending requests. Supplement exhaustive SQL-seeded tests with connected ordinary-interface data/canaries and controlled scheduling only to expose pending state.",
+        "completionEvidence": "Repeated pending export retains job identity across reopen. Snapshot agrees with acceptance-time profile/session facts, memberships/owned community/content, votes/reports/moderation, notifications/blocks/rate, saves/history/preferences, traversals and rights history. Later changes are absent; passwords/verifiers/salts/session credentials/privileged security material and foreign private payload never appear.",
+        "requirement": "While an account is active, when its authenticated owner requests export, the system shall accept one durable pending owner-scoped acceptance-time snapshot."
+      },
+      {
+        "criterionId": "AC-RC15-5F",
+        "invariant": "Pending export completes once into the original immutable owner-only payload; newer exports cannot replace earlier output.",
+        "affectedPaths": [
+          "src/privacy/privacy-service.js",
+          "src/privacy/privacy-worker.js",
+          "src/privacy/privacy-repository.js",
+          "tests/privacy-rights-export.test.js",
+          "tests/privacy-rights-recovery.test.js",
+          "tests/rc15-lifecycle.test.js"
+        ],
+        "hypothesis": "Use normal autonomous and delayed work around existing pending/payload guards; observe owner routes with foreign/admin controls.",
+        "completionEvidence": "Same job progresses pending-to-completed without resnapshotting. Repeated complete results are byte-identical and match acceptance ledger. Foreign/admin retrieval fails. Duplicate completion adds no event/payload. New active-owner export gets a new job without changing previous completed output.",
+        "requirement": "While an export is pending and its owner remains eligible, when durable background work completes, the system shall make the original snapshot available only to its owner and mark the same export completed."
+      },
+      {
+        "criterionId": "AC-RC15-5G",
+        "invariant": "Deletion acceptance atomically restricts only authorized target, revokes all its sessions/exports and retains one durable pending job.",
+        "affectedPaths": [
+          "src/privacy/privacy-service.js",
+          "src/privacy/privacy-repository.js",
+          "src/auth/auth-repository.js",
+          "src/app.js",
+          "tests/privacy-rights-deletion.test.js",
+          "tests/rc15-lifecycle.test.js"
+        ],
+        "hypothesis": "Preserve single SQLite acceptance transaction. Use separate self/admin-target cases with multiple sessions, pending/completed exports and roles/content; retain an authorized surviving administrator observer.",
+        "completionEvidence": "Acceptance denies all target credentials/new login and revokes pending/completed exports with unavailable payload. Pending job survives restart; administrator repeat returns same job while revoked target credentials cannot repeat privileged actions. Unrelated accounts/sessions/private data stay unchanged.",
+        "requirement": "While an account is active, when its owner or an independently authorized site administrator requests deletion, the system shall atomically restrict that target account, revoke all its sessions and exports, and accept its durable pending deletion job."
+      },
+      {
+        "criterionId": "AC-RC15-5H",
+        "invariant": "Completion follows actual local erasure/compaction while non-authenticating tombstones preserve unrelated structure/authority.",
+        "affectedPaths": [
+          "src/privacy/privacy-repository.js",
+          "src/privacy/privacy-service.js",
+          "src/privacy/privacy-worker.js",
+          "src/database.js",
+          "tests/privacy-rights-erasure.test.js",
+          "tests/privacy-rights-shared-structure.test.js",
+          "tests/rc15-lifecycle.test.js",
+          "tests/rc15-recovery.test.js"
+        ],
+        "hypothesis": "Retain durable accepted/rows_erased/compacted phases and completion-last. Expand ordinary data/credential/encoded canaries. Reproduce cross-owner retained-reference risk: exports contain block counterpart IDs, erase removes target exports only and verifyErasure scans all tables, potentially stalling on another owner's snapshot. Do not weaken checks, silently modify immutable snapshots or revoke unrelated exports; ask before a demonstrated conflict requires a product-changing remedy.",
+        "completionEvidence": "Scan all application-owned tables/files and relevant decoded representations for target identity/credentials/private state/content/export markers after autonomous completion; assert integrity and no early completion. Tombstone cannot authenticate. Unrelated members/moderators/sessions/posts/replies survive, erased ancestors retain navigation without author/body, erased votes stop contributing, and audit stays ordered/privacy-safe. Cross-owner cases must not leave recoverable target markers or permanently stuck erasure.",
+        "requirement": "While an accepted deletion is pending, when erasure completes, the system shall remove locally recoverable target identity, credentials, private state, owned content payloads and export snapshots while retaining non-identifying audit and navigable shared structure."
+      },
+      {
+        "criterionId": "AC-RC15-5I",
+        "invariant": "Retries/late/reordered/unsupported actions preserve terminal export/deletion/content boundaries without duplicate lifecycle effects.",
+        "affectedPaths": [
+          "src/privacy/privacy-service.js",
+          "src/privacy/privacy-worker.js",
+          "src/privacy/privacy-repository.js",
+          "src/moderation/moderation-service.js",
+          "tests/privacy-rights-transitions.test.js",
+          "tests/rc15-lifecycle.test.js",
+          "tests/rc15-recovery.test.js"
+        ],
+        "hypothesis": "Use explicit transition oracle and existing event guards/trusted worker seams including restart. Preserve export pending-to-completed/revoked and completed-to-revoked only, and account active-to-restricted/pending-to-erased. No cancel/reactivate API.",
+        "completionEvidence": "Duplicate pending acceptance/completion/revocation, late completion after revocation, stale erasure phases, restart, unsupported cancellation/reactivation and restoration after deletion/erasure retain legal states/identities. No extra audit/delivery or retrievable revoked payload appears. Repeated completion is stable and unrelated active users still operate.",
+        "requirement": "When late, duplicate, reordered or unsupported events address lifecycle state, the system shall preserve the legal transition graph and terminal privacy/deletion boundaries."
+      },
+      {
+        "criterionId": "AC-RC15-5J",
+        "invariant": "Author deletion irreversibly removes post visibility/contributions but preserves body-free ancestry for surviving replies.",
+        "affectedPaths": [
+          "src/post/post-service.js",
+          "src/post/post-repository.js",
+          "src/comment/comment-service.js",
+          "src/comment/comment-repository.js",
+          "src/feed/feed-repository.js",
+          "src/personal/personal-repository.js",
+          "src/vote/vote-repository.js",
+          "tests/rc15-lifecycle.test.js"
+        ],
+        "hypothesis": "Test existing author routes/readable/tombstone behavior with retained references/pages; separately verify cascades/contributions and keyed replay rather than relying on removal tests.",
+        "completionEvidence": "Deleted saved/voted post vanishes from direct/media/discovery/personal and retained reads with no score contribution. Deleted comment ancestor retains original navigation identity without body/author and another author's attached reply survives. Later edits/restore/references cannot revive payload or detach descendants; unrelated data is intact.",
+        "requirement": "When an authorized author deletes a post or comment, the system shall preserve the established deletion boundary across discovery and dependent personal state without detaching surviving conversation descendants."
+      },
+      {
+        "criterionId": "AC-RC15-6",
+        "invariant": "Acknowledged state survives local process/storage faults and pending work resumes autonomously once without a replacement empty store.",
+        "affectedPaths": [
+          "src/server.js",
+          "src/readiness.js",
+          "src/database.js",
+          "src/privacy/privacy-worker.js",
+          "src/privacy/privacy-service.js",
+          "tools/rc14-process-fixture.js",
+          "tests/rc14-recovery.test.js",
+          "tests/rc15-recovery.test.js",
+          "tools/rc15-fixture.js"
+        ],
+        "hypothesis": "Extend retained subprocess fixture to the full two-community ledger; existing retained-identity checks/autonomous retries/checkpoints are the mechanism. Separate business state from legitimate pending progress/monitor rows.",
+        "completionEvidence": "After graceful stop, abrupt kill, unavailable writes and temporary retained-path loss/restoration, all acknowledged authorized identities/state match ledger including all post types, report/search/roles/private state/notifications/votes/traversals/terminal jobs. Pending export/deletion finishes once without resubmission or readiness polling. Revoked exports remain terminal; reset/empty store/lost acknowledgements fails.",
+        "requirement": "When the local process restarts or retained storage becomes temporarily unavailable and returns, the system shall recover acknowledged cross-feature state and resume accepted background jobs from their durable progress without duplicate effects."
+      },
+      {
+        "criterionId": "AC-RC15-6A",
+        "invariant": "Precommit persistence/required-delivery failures acknowledge nothing and leave no partial source, delivery, audit, preferences or privacy effects.",
+        "affectedPaths": [
+          "src/comment/comment-service.js",
+          "src/vote/vote-service.js",
+          "src/moderation/moderation-service.js",
+          "src/notification/notification-service.js",
+          "src/personal/personal-service.js",
+          "src/privacy/privacy-service.js",
+          "tests/notification-flow.test.js",
+          "tests/rc15-recovery.test.js"
+        ],
+        "hypothesis": "Use existing trusted before-persist/delivery/acceptance seams and local DB faults inside transactions, not HTTP fault APIs. Content-with-notification uses eligible reply/mention events, not invented post-create notifications.",
+        "completionEvidence": "Fail reply/comment+delivery, vote+delivery, moderation+audit/delivery, preferences and deletion acceptance. Every refusal leaves content/contributions/events/jobs/restriction/sessions/exports unchanged. Remove fault and repeat: one success commits entire effect while unrelated acknowledged work survives.",
+        "requirement": "When persistence or downstream delivery fails before commitment of a cross-feature mutation, the system shall refuse acknowledgement and leave all its business effects unapplied."
+      },
+      {
+        "criterionId": "AC-RC15-6B",
+        "invariant": "Response loss cannot undo commitment or authorize unsafe retries; reconciliation preserves single identities/effects.",
+        "affectedPaths": [
+          "src/server.js",
+          "src/post/post-service.js",
+          "src/vote/vote-service.js",
+          "src/moderation/moderation-service.js",
+          "src/privacy/privacy-service.js",
+          "tools/rc14-process-fixture.js",
+          "tests/rc15-recovery.test.js"
+        ],
+        "hypothesis": "Use local transport/proxy permitting normal commit then dropping success. Reuse supported keyed post/current vote/stable moderation/pending rights semantics only. Reconcile deletion through an existing administrator rather than revoked credentials.",
+        "completionEvidence": "Drop responses for keyed post, vote assignment, removal, export/deletion acceptance; ordinary authorized reads/supported retries show stable post/job identity, final vote and one audit/eligible delivery. Conflicting post key/body fails. Deletion credentials stay revoked. Reopen/retry neither multiplies jobs nor treats transport failure as rollback.",
+        "requirement": "When a successful response is lost, subsequent reconciliation or supported idempotent retry shall recover the committed result without interpreting response loss as rollback or duplicating its effects."
+      },
+      {
+        "criterionId": "AC-RC15-6C",
+        "invariant": "Readiness observes initialized current durable capability, never triggers recovery/business mutation/delivery/storage replacement or process control.",
+        "affectedPaths": [
+          "src/readiness.js",
+          "src/operational-http.js",
+          "src/server.js",
+          "src/app.js",
+          "tests/rc14-health.test.js",
+          "tests/rc14-storage.test.js",
+          "tests/rc15-recovery.test.js"
+        ],
+        "hypothesis": "Preserve independent monitor/worker scheduling; observe waits for independent sample and operational singleton is not business state. Compare state/worker counters without misattributing autonomous progress to polling.",
+        "completionEvidence": "Initialization/write-denied/missing-retained states yield fixed not-ready; restored capability yields ready. Restore without polling and prove autonomous recovery/jobs. Repeated checks do not accept jobs, recreate/migrate storage or deliver work. POST readiness/unsupported restart controls remain fixed refusals for all roles without paths/cookies/credentials/diagnostics.",
+        "requirement": "When an operational observer checks readiness, the system shall report current initialized durable capability without initiating user-state mutation, recovery or worker progress through the check itself."
+      },
+      {
+        "criterionId": "AC-RC15-7",
+        "invariant": "Acceptance needs fresh independent inventory-wide/criterion-wide evidence on one final candidate with no unresolved blocking gate.",
+        "affectedPaths": [
+          "docs/rc15-qualification.md",
+          "tests/rc15-participation.test.js",
+          "tests/rc15-pagination.test.js",
+          "tests/rc15-authority.test.js",
+          "tests/rc15-concurrency.test.js",
+          "tests/rc15-lifecycle.test.js",
+          "tests/rc15-recovery.test.js",
+          "README.md",
+          ".dagger/src/index.ts"
+        ],
+        "hypothesis": "Maintain inventory/criterion/evidence matrix separating developer regressions, independent verification and Factory gates. Track findings/repairs/reruns. Historical acceptance and local tests remain supporting evidence only.",
+        "completionEvidence": "Every RC-01..RC-14 feature and RC-15 criterion links final-candidate success/boundary/invalid/permission/transition/recovery/prohibited-effect evidence where applicable. Independent behavioral/security/maintainability/qualification gates pass without blockers. Missing observations/stale identities/failures prevent acceptance; changes require refreshed affected evidence and final whole-system gates.",
+        "requirement": "When RC-15 final acceptance is evaluated, the final candidate shall have fresh passing independent behavioral evidence for every feature in the inventory and every RC-15 criterion, with no unresolved blocking qualification, security or maintainability finding."
+      },
+      {
+        "criterionId": "AC-RC15-7A",
+        "invariant": "Gates/receipts measure real behavior, not bypasses, weaker coverage, fabricated observations or synthetic acceptance.",
+        "affectedPaths": [
+          "tests",
+          "tools/rc14-load.js",
+          "tools/rc14-browser.js",
+          "src/app.js",
+          ".dagger/src/index.ts",
+          ".semgrep/software-factory-anti-slop.yml",
+          "docs/rc15-qualification.md"
+        ],
+        "hypothesis": "Review baseline diffs for weakened/removed assertions, constant-success routes, hidden-only capabilities, disabled safety and evidence-binding gaps. Preserve suites and add independent ordinary-interface defect regressions.",
+        "completionEvidence": "Final reviews find no skipped required checks, disabled controls, fabricated receipts or hidden-only/synthetic acceptance surfaces. Each repaired failure has an ordinary-interface regression using independent data. All receipts match final candidate; failed/unobserved obligations remain explicit rather than replaced by old local results.",
+        "requirement": "When qualification is performed, the system shall preserve the existing behavior and safety assertions rather than making gates pass through bypasses or fabricated observations."
+      },
+      {
+        "criterionId": "AC-RC15-7B",
+        "invariant": "Rendered keyboard/authentication accessibility persists, with actual native speech and zoom evidence separate from DOM/root-text assertions.",
+        "affectedPaths": [
+          "src/public-shell.js",
+          "src/public-communities.js",
+          "tests/rc14-browser.test.js",
+          "tools/rc14-browser.js",
+          "README.md",
+          "docs/rc15-qualification.md"
+        ],
+        "hypothesis": "Retain matched browser and existing design. Source covers widths320/768/1280 and text100/200, keyboard/auth failures and session checks. Provisioned browser/native binaries were inspected, but default-session Orca could not reach accessibility bus. Establish README's private native session with existing facilities; no fallback installation or inferred speech.",
+        "completionEvidence": "Fresh rendered journeys cover signup/login/logout, anonymous/auth navigation, rejection/interruption/correction, labels/landmarks, forward/backward focus, visible unobscured controls and no overlap/overflow at all six width/text combinations with actual session/revocation outcomes. Separately record native-input speech of controls/context and complete dynamic error before focus leaves submit. Observe actual native200-percent browser zoom through rejection/correction/logout with zoom/focus/session evidence distinct from root scaling. Unobserved/unavailable native checks remain unresolved.",
+        "requirement": "While users traverse the existing rendered authentication and navigation journeys, the system shall remain keyboard-operable and accessible at the established responsive and enlargement boundaries, including recovery from rejected or interrupted authentication."
+      }
+    ],
+    "technologyDecision": {
+      "schemaVersion": "technology-decision.v1",
+      "changeKind": "incumbent_continuation",
+      "repositoryEvidence": [
+        "repo:package.json",
+        "repo:src/app.js",
+        "repo:src/database.js",
+        "repo:src/privacy/privacy-service.js",
+        "repo:tests/rc14-recovery.test.js",
+        "repo:tests/privacy-rights-transitions.test.js",
+        "repo:tools/rc14-browser.js",
+        "repo:.dagger/src/index.ts",
+        "repo:README.md"
+      ],
+      "decisionDrivers": [
+        "Preserve existing product, authority and approved runtime boundaries during bounded capstone repair.",
+        "Existing transactions, uniqueness, retained traversals and workers directly address composition/recovery requirements.",
+        "Prefer narrow owning-module repairs and connected independent oracles over unrelated rewrites or dependencies.",
+        "Keep isolated local fault fixtures, matched provisioned observation facilities and independent Factory gates."
+      ],
+      "incumbentApproach": "Node 24 ESM with built-in HTTP, crypto and synchronous SQLite; per-feature validation/service/repository/representation modules; retained local storage and autonomous privacy/readiness work; node:test HTTP/subprocess fixtures, matched Playwright/Chromium and native AT observations.",
+      "selectedApproach": "Node 24 ESM with built-in HTTP, crypto and synchronous SQLite; per-feature validation/service/repository/representation modules; retained local storage and autonomous privacy/readiness work; node:test HTTP/subprocess fixtures, matched Playwright/Chromium and native AT observations.",
+      "rationale": "Continue the incumbent unchanged technology stack. Add bounded connected tests/evidence and repair demonstrated defects within current query/validation/transaction boundaries. Missing audit expiry is a local repair, not a migration justification. No new dependency or technology-adherence obligation is introduced.",
+      "alternatives": [],
+      "candidateAdherenceProbes": [],
+      "dependencyHealth": {
+        "status": "assessed",
+        "conclusion": "No new dependencies proposed. Root runtime uses Node built-ins; pinned existing qualification/browser tools continue. Read-only inspection observed Node24.19.0 and matched browser metadata/executable, not vulnerability clearance or final behavior. Independent security/qualification remains required.",
+        "evidenceRefs": [
+          "repo:package.json",
+          "repo:.dagger/src/index.ts",
+          "repo:tools/rc14-browser.js"
+        ]
+      },
+      "licenseFit": {
+        "status": "assessed",
+        "conclusion": "No licensing/redistribution change is proposed. Private package status is not a project-wide license conclusion. Retain existing tooling without vendoring/new packages; assess licensing separately if a later dependency/redistribution amendment is proposed.",
+        "evidenceRefs": [
+          "repo:package.json",
+          "repo:.dagger/src/index.ts"
+        ]
+      },
+      "securityFit": {
+        "status": "assessed",
+        "conclusion": "Retain hashed credentials, current authority, trusted-only administration, fixed non-disclosing errors and transactional effects. Prioritize audit expiry and reproduce cached-post/current-visibility/retained-export risks. No new debug/restart/authority API. Focus review at changed boundaries; source inspection cannot clear independent security findings.",
+        "evidenceRefs": [
+          "repo:src/auth/auth-repository.js",
+          "repo:src/app.js",
+          "repo:src/post/post-service.js",
+          "repo:src/privacy/privacy-repository.js",
+          "repo:src/privacy/privacy-service.js",
+          "repo:src/operational-http.js"
+        ]
+      },
+      "runtimeCompatibility": {
+        "status": "assessed",
+        "conclusion": "Inspected Node/browser artifacts match repository requirements; desktop input/capture capabilities are available. Orca50.2 path, SpeechDispatcher0.12.1 and PulseAudio17.0 are provisioned, but default-session Orca lacked a reachable accessibility bus. Establish documented private native setup using existing facilities. Successful native speech/zoom remains pending; no fallback installation.",
+        "evidenceRefs": [
+          "repo:README.md",
+          "repo:tools/rc14-browser.js"
+        ]
+      },
+      "operationalFit": {
+        "status": "assessed",
+        "conclusion": "Local retained storage, independent readiness, autonomous worker and subprocess fixtures fit authorized recovery scope. Use isolated nonprivileged processes for meaningful permission faults. No HTTP process controls, empty replacement storage or polling-driven recovery. Capacity requires fresh final100-user/300-second measurement.",
+        "evidenceRefs": [
+          "repo:src/readiness.js",
+          "repo:src/server.js",
+          "repo:tools/rc14-process-fixture.js",
+          "repo:tests/rc14-recovery.test.js",
+          "repo:tools/rc14-load.js",
+          "repo:.dagger/src/index.ts"
+        ]
+      },
+      "rejectionCriteria": [
+        "Reject unapproved product/authority/privacy/cost changes, excluded interfaces or fallback observation installation.",
+        "Reject weakened assertions/thresholds, missing tails, fabricated receipts, disabled safety, polling-driven recovery or local-only acceptance.",
+        "Reject unbounded rewrites/migrations without evidence the incumbent cannot meet binding requirements."
+      ],
+      "revisitCriteria": [
+        "A reproduced blocker cannot be repaired inside existing boundaries while preserving sealed behavior.",
+        "Cross-owner erasure/export interactions demonstrate a binding conflict: seek approval before changing snapshot/revocation semantics.",
+        "Native setup remains unavailable after bounded diagnosis: escalate exact capability/setup boundary, not a waiver.",
+        "Actual load/security/maintainability evidence exposes architectural limits: record contiguous strategy versions with discovery/evidence, preserved constraints and verification consequences before significant amendment."
+      ],
+      "rolloutVerification": "No deployment/migration. Reproduce and repair in isolated fixtures, rerun targeted checks, freeze candidate and obtain fresh independent whole-system/Factory gates. Bind load/rendered/native/inventory evidence to that candidate; later changes require refreshed affected evidence and final gates."
+    },
+    "steps": [
+      "Record accepted RC-14 baseline af62617ae47d2fccd94dcdb8ba3154ec4a06fbf7 and proposed docs/rc15-qualification.md inventory/criterion evidence matrix with ownership/observed status. Factory alone validates admission/attempt and acceptance; do not alter workflow state.",
+      "Add proposed tools/rc15-fixture.js plus focused participation/pagination/concurrency/authority/lifecycle/recovery tests. Populate ordinary interfaces with explicit independent identity/contribution ledgers. Trusted clocks/faults/workers expose controlled boundaries only, never customer diagnostics or synthetic acceptance.",
+      "Reproduce audit expiry, keyed post replay after removal, requester visibility and cross-owner retained export references during erasure. Retain minimal failing regressions and apply narrow owning-module fixes without weakening terminal erasure, completed snapshots or active idempotency. Ask only when demonstrated conflict requires a product/authority-changing remedy.",
+      "Complete participation, all page sizes/defaults/ties/TTLs, real contention, role/session matrix, safety and invalid-input before/after ledgers. Preserve retained Home snapshot semantics and no new comment TTL.",
+      "Complete removal/restoration, role/membership lifecycle, author deletion, export acceptance/completion/revocation, deletion restriction/erasure and late/reordered work using shared identities. Inspect SQL/raw/encoded retained canaries, shared descendants and unrelated authority.",
+      "Extend full-ledger graceful/abrupt and storage-fault recovery, proving autonomous jobs without polling. Separate precommit rollback from committed response loss using supported idempotency/authorized observers only.",
+      "Run rendered coverage with matched facilities, establish documented private native AT/audio setup and observe actual native speech and browser200-percent zoom separately from DOM/root-text checks. If unavailable after bounded diagnosis, retain unresolved status and escalate precise setup boundary; no substitutes.",
+      "Freeze repaired candidate after targeted checks. Run full suite/typecheck/build, separate uninterrupted load, native/rendered observations and independent behavioral/security/maintainability/Factory qualification. Correlate receipts/recompute load results, leaving no unresolved required gate. Significant strategy amendments record contiguous versions, new discovery/evidence, preserved constraints and verification impacts; records never grant product/permission/cost authority."
+    ],
+    "testCommands": [
+      "node --test --no-warnings tests/privacy-rights-audit.test.js tests/post-flow.test.js tests/moderation-flow.test.js",
+      "node --test --no-warnings tests/rc15-participation.test.js tests/rc15-pagination.test.js tests/rc15-concurrency.test.js tests/rc15-authority.test.js",
+      "node --test --no-warnings tests/rc15-lifecycle.test.js tests/privacy-rights-export.test.js tests/privacy-rights-erasure.test.js tests/privacy-rights-shared-structure.test.js tests/privacy-rights-transitions.test.js",
+      "node --test --no-warnings tests/rc15-recovery.test.js tests/rc14-recovery.test.js tests/rc14-health.test.js tests/rc14-storage.test.js",
+      "node --test --no-warnings tests/rc14-measurement.test.js",
+      "node --test tests/rc14-browser.test.js",
+      "npm test",
+      "npm run typecheck",
+      "npm run build",
+      "node tools/rc14-load.js"
+    ],
+    "assumptions": [
+      "Discovery strategy version1 remains within sealed bounded attempt; Factory owns admission/concurrency/attempt authority and acceptance.",
+      "All rc15 paths and docs/rc15-qualification.md are proposed additions, not existing passing evidence. Corresponding commands run after implementation. No product tests/qualification ran during planning.",
+      "Source facts/omissions are not final behavioral acceptance. Historical README performance/native receipts are supporting prerequisites only.",
+      "Installed matched artifacts do not prove native observation. Default Orca accessibility-bus failure requires documented private-session setup with existing facilities, not replacement installation.",
+      "Leaving public community changes fresh Home eligibility, not automatically an issued Home snapshot; current read/role authority still governs protected content.",
+      "Notifications expose related-item/event IDs rather than bodies. Content-with-delivery tests use eligible replies/mentions; no invented post-create notifications or requirement to delete historical event IDs.",
+      "Use isolated operator-owned local data/artifacts and meaningful nonprivileged permission tests only; no live users, external backups, managed deployment or customer process controls.",
+      "Cross-owner erasure/snapshot and block-listing risks need ordinary-interface reproduction. Do not silently change completed snapshots, revoke unrelated exports or weaken erasure; ask if an actual binding conflict is demonstrated.",
+      "No new technology/dependency is selected, so no ceremonial alternatives/adherence probes are needed. Criterion tests and independent gates verify behavior.",
+      "Final evidence includes actual native speech/zoom and full load in addition to repository qualification. A failing/unobserved required gate remains blocking regardless of local suite success."
+    ],
+    "bindingConstraints": [
+      {
+        "id": "AC-RC15-1",
+        "kind": "product",
+        "requirement": "While users and communities are active, when users perform the connected participation journey, the system shall expose mutually consistent durable identities and outcomes across authentication, profile edits, community participation, all three post types, comments/replies, votes, discovery, reporting, notifications, saved posts, history and preferences."
+      },
+      {
+        "id": "AC-RC15-2",
+        "kind": "product",
+        "requirement": "While page-family content spans page boundaries, when an authorized actor traverses or replays pages, the system shall return the complete eligible snapshot in its deterministic order without duplicate identities or unauthorized content."
+      },
+      {
+        "id": "AC-RC15-2A",
+        "kind": "product",
+        "requirement": "While 100 distinct authenticated users continuously exercise core feed reads for 300 seconds, the system shall maintain a failure rate strictly below 1 percent and nearest-rank p95 latency strictly below 750 milliseconds over the same complete issued-request population."
+      },
+      {
+        "id": "AC-RC15-2B",
+        "kind": "product",
+        "requirement": "When concurrent or repeated operations target the same membership, current vote, save, report or eligible notification event, the system shall converge on the legal single-resource result rather than multiplying user-visible effects."
+      },
+      {
+        "id": "AC-RC15-3",
+        "kind": "product",
+        "requirement": "When a cross-feature request is malformed, contradictory, targets an unavailable object or attempts an invalid transition, the system shall refuse it without any partial business effect or protected disclosure."
+      },
+      {
+        "id": "AC-RC15-3A",
+        "kind": "product",
+        "requirement": "When unsafe content, exhausted posting capacity or a directional block applies, the system shall enforce the existing safety boundary before creating downstream user-visible effects."
+      },
+      {
+        "id": "AC-RC15-4",
+        "kind": "product",
+        "requirement": "When any role attempts a protected operation or read, the system shall enforce current authentication, content ownership, community scope, personal-data ownership and independently granted site-administrator authority before exposing protected data or changing state."
+      },
+      {
+        "id": "AC-RC15-4A",
+        "kind": "product",
+        "requirement": "When a session expires, is logged out or loses account authority, the system shall refuse further authenticated actions using that session without affecting another valid user's session."
+      },
+      {
+        "id": "AC-RC15-5",
+        "kind": "product",
+        "requirement": "While a post is active, when its authorized moderator removes it, the system shall make the post and its dependent content unavailable through all read surfaces while retaining one ordered immutable moderation event."
+      },
+      {
+        "id": "AC-RC15-5A",
+        "kind": "product",
+        "requirement": "While a post is moderator-removed but not author-deleted or privacy-erased, when an authorized moderator restores it, the system shall restore its permitted read visibility under the same identity and append one restoration event."
+      },
+      {
+        "id": "AC-RC15-5B",
+        "kind": "product",
+        "requirement": "While an active user is an ordinary member, when the community owner promotes that member, the system shall change only that member's role to moderator for that community."
+      },
+      {
+        "id": "AC-RC15-5C",
+        "kind": "product",
+        "requirement": "While a member is a moderator, when the community owner demotes that member, the system shall retain ordinary membership and immediately remove that community's moderation authority."
+      },
+      {
+        "id": "AC-RC15-5D",
+        "kind": "product",
+        "requirement": "When a non-owner leaves a community, the system shall remove only that actor's membership and its dependent community authority; an owner's leave request shall preserve ownership."
+      },
+      {
+        "id": "AC-RC15-5E",
+        "kind": "product",
+        "requirement": "While an account is active, when its authenticated owner requests export, the system shall accept one durable pending owner-scoped acceptance-time snapshot."
+      },
+      {
+        "id": "AC-RC15-5F",
+        "kind": "product",
+        "requirement": "While an export is pending and its owner remains eligible, when durable background work completes, the system shall make the original snapshot available only to its owner and mark the same export completed."
+      },
+      {
+        "id": "AC-RC15-5G",
+        "kind": "product",
+        "requirement": "While an account is active, when its owner or an independently authorized site administrator requests deletion, the system shall atomically restrict that target account, revoke all its sessions and exports, and accept its durable pending deletion job."
+      },
+      {
+        "id": "AC-RC15-5H",
+        "kind": "product",
+        "requirement": "While an accepted deletion is pending, when erasure completes, the system shall remove locally recoverable target identity, credentials, private state, owned content payloads and export snapshots while retaining non-identifying audit and navigable shared structure."
+      },
+      {
+        "id": "AC-RC15-5I",
+        "kind": "product",
+        "requirement": "When late, duplicate, reordered or unsupported events address lifecycle state, the system shall preserve the legal transition graph and terminal privacy/deletion boundaries."
+      },
+      {
+        "id": "AC-RC15-5J",
+        "kind": "product",
+        "requirement": "When an authorized author deletes a post or comment, the system shall preserve the established deletion boundary across discovery and dependent personal state without detaching surviving conversation descendants."
+      },
+      {
+        "id": "AC-RC15-6",
+        "kind": "product",
+        "requirement": "When the local process restarts or retained storage becomes temporarily unavailable and returns, the system shall recover acknowledged cross-feature state and resume accepted background jobs from their durable progress without duplicate effects."
+      },
+      {
+        "id": "AC-RC15-6A",
+        "kind": "product",
+        "requirement": "When persistence or downstream delivery fails before commitment of a cross-feature mutation, the system shall refuse acknowledgement and leave all its business effects unapplied."
+      },
+      {
+        "id": "AC-RC15-6B",
+        "kind": "product",
+        "requirement": "When a successful response is lost, subsequent reconciliation or supported idempotent retry shall recover the committed result without interpreting response loss as rollback or duplicating its effects."
+      },
+      {
+        "id": "AC-RC15-6C",
+        "kind": "product",
+        "requirement": "When an operational observer checks readiness, the system shall report current initialized durable capability without initiating user-state mutation, recovery or worker progress through the check itself."
+      },
+      {
+        "id": "AC-RC15-7",
+        "kind": "product",
+        "requirement": "When RC-15 final acceptance is evaluated, the final candidate shall have fresh passing independent behavioral evidence for every feature in the inventory and every RC-15 criterion, with no unresolved blocking qualification, security or maintainability finding."
+      },
+      {
+        "id": "AC-RC15-7A",
+        "kind": "product",
+        "requirement": "When qualification is performed, the system shall preserve the existing behavior and safety assertions rather than making gates pass through bypasses or fabricated observations."
+      },
+      {
+        "id": "AC-RC15-7B",
+        "kind": "product",
+        "requirement": "While users traverse the existing rendered authentication and navigation journeys, the system shall remain keyboard-operable and accessible at the established responsive and enlargement boundaries, including recovery from rejected or interrupted authentication."
+      },
+      {
+        "id": "CON-RC15",
+        "kind": "project",
+        "requirement": "Preserve repository and campaign authority boundaries. This is one RC-15 capstone/repair attempt, not a replacement for an active or accepted RC-15 execution. Factory validates sealed admission, dependencies, concurrency and remaining attempt authority."
+      },
+      {
+        "id": "CON-RC15-LOCAL",
+        "kind": "project",
+        "requirement": "Qualification and fault injection use isolated local fixture data and retained artifacts under operator control, never live users, external backups or managed production infrastructure."
+      },
+      {
+        "id": "CON-RC15-PRESERVE",
+        "kind": "project",
+        "requirement": "Preserve established public behavior and interoperability across the feature inventory. Repair demonstrated integration defects and blocking findings without adding unrelated product features or replacing approved runtime capabilities. Technology and local implementation tactics remain engineering decisions."
+      },
+      {
+        "id": "CON-RC15-EVIDENCE",
+        "kind": "project",
+        "requirement": "Use the already provisioned matched rendered/native observation facilities described by canonical evidence. Missing capabilities require the real capability/setup boundary; do not install a fallback or claim an unperformed observation."
+      },
+      {
+        "id": "EX-RC15",
+        "kind": "product",
+        "requirement": "Advertising, payments, awards, private chat, livestreaming, federation, native mobile applications and managed deployment."
+      },
+      {
+        "id": "EX-RC15-NO-EXPANSION",
+        "kind": "product",
+        "requirement": "New capstone/customer diagnostic/restart endpoints, invented community deletion, external-backup erasure, customer cancellation of privacy jobs, reactivation, legal holds and replacement of the existing feature interface contracts."
+      }
+    ],
+    "strategyVersion": 1
+  }
+}
