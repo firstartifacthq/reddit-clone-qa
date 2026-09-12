@@ -64,9 +64,9 @@ export class PrivacyRepository {
   maxAuditSequence() { return this.database.prepare("SELECT COALESCE(MAX(occurrence_sequence),0) AS value FROM privacy_job_events").get().value; }
   auditRange(maximum, after, limit) { return this.database.prepare("SELECT id, occurrence_sequence, operation, action, occurred_at FROM privacy_job_events WHERE occurrence_sequence > ? AND occurrence_sequence <= ? ORDER BY occurrence_sequence ASC, id ASC LIMIT ?").all(after, maximum, limit); }
   createTraversal(id, administrator, maximum, now) { this.database.prepare("INSERT INTO privacy_audit_traversals (id, administrator_user_id, maximum_sequence, created_at, expires_at) VALUES (?, ?, ?, ?, ?)").run(id, administrator, maximum, now, now + 86_400_000); }
-  traversal(token, administrator) { return this.database.prepare(`SELECT traversal.id, token.next_sequence, traversal.maximum_sequence
+  traversal(token, administrator, now) { return this.database.prepare(`SELECT traversal.id, token.next_sequence, traversal.maximum_sequence
     FROM privacy_audit_tokens token JOIN privacy_audit_traversals traversal ON traversal.id=token.traversal_id
-    WHERE token.token=? AND traversal.administrator_user_id=?`).get(token, administrator); }
+    WHERE token.token=? AND traversal.administrator_user_id=? AND traversal.expires_at>?`).get(token, administrator, now); }
   token(id, traversal, next) {
     this.database.prepare("INSERT OR IGNORE INTO privacy_audit_tokens (token, traversal_id, next_sequence) VALUES (?, ?, ?)").run(id, traversal, next);
     return this.database.prepare("SELECT token FROM privacy_audit_tokens WHERE traversal_id=? AND next_sequence=?").get(traversal, next).token;
