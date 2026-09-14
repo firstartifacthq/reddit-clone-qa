@@ -25,6 +25,11 @@ let
   };
 in
 {
+  languages.javascript = {
+    enable = true;
+    package = pkgs.nodejs_24;
+  };
+
   packages = [ dagger ];
 
   # Devenv 2.2.2's generated container-copy task exports values from a
@@ -34,5 +39,26 @@ in
   # here makes task validation recursively depend on shell materialization.
   tasks."devenv:container:copy" = {
     exports = lib.mkForce [ ];
+  };
+
+  # SQLite lives under .devenv; migrations run inside npm start.
+  tasks."reddit:state" = {
+    exec = ''
+      mkdir -p "$DEVENV_STATE"
+    '';
+    before = [ "devenv:processes:api" ];
+  };
+
+  # Factory admission starts declared processes and waits on probes.
+  # The product runtime is npm start (JSON HTTP API), not a second supervisor.
+  processes.api = {
+    after = [ "reddit:state" ];
+    exec = ''
+      set -euo pipefail
+      export DATABASE_PATH="$DEVENV_STATE/reddit.sqlite"
+      export PORT="3000"
+      exec npm start
+    '';
+    ready.http.get = { port = 3000; path = "/health/ready"; };
   };
 }
